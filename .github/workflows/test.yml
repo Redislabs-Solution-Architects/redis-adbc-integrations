@@ -35,13 +35,25 @@ jobs:
         run: python -m unittest discover -s scripts -v
 
   integrations:
-    name: ${{ matrix.suite }}
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.suite }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        suite: [analytics, airflow, ray]
+        include:
+          - suite: analytics
+            arch: amd64
+            runner: ubuntu-24.04
+          - suite: analytics
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - suite: airflow
+            arch: amd64
+            runner: ubuntu-24.04
+          - suite: ray
+            arch: amd64
+            runner: ubuntu-24.04
     env:
       SSL_CERT_DIR: /etc/ssl/certs
       RUN_AIRFLOW_TESTS: '1'
@@ -92,7 +104,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: framework-${{ matrix.suite }}
+          name: framework-${{ matrix.suite }}-${{ matrix.arch }}
           path: '*results.xml'
           if-no-files-found: warn
       - name: Remove owned fixture

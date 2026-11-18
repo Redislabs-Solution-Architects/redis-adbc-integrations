@@ -67,7 +67,8 @@ export REDIS_ADBC_LIBRARY="$PWD/driver/go/build/libadbc_driver_redis.so"
 bash driver/go/software-setup.sh --exec python -m pytest -q "$PWD/python/tests/test_dask.py" "$PWD/python/tests/test_dask_write.py"
 ```
 
-CI owns isolated Software fixtures for analytics, Airflow and Ray jobs. Ray also
+CI owns isolated Software fixtures for analytics on Linux amd64/arm64 and for
+Airflow and Ray on Linux amd64, preserving the extracted architecture coverage. Ray also
 runs an independent private-CA worker trust fixture. Test reports include skips;
 an unavailable Superset dependency set is a blocker, not a passing check.
 
