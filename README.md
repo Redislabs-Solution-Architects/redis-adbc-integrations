@@ -83,3 +83,5 @@ A published GitHub release runs all supported integration jobs before attaching
 the pure Python wheel, source distribution and SHA-256 files to that release.
 PyPI publication is not configured; install from source until an artifact is
 available. Framework releases are independent of the driver's release workflow.
+
+Upstream extraction and migration review: [redis-adbc-driver #489](https://github.com/redis/redis-adbc-driver/pull/489).

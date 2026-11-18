@@ -111,7 +111,7 @@ jobs:
         if: github.event_name == 'release'
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: uv version --project python "${RELEASE_TAG#v}"
+        run: uv version --frozen --project python "${RELEASE_TAG#v}"
       - name: Build independent Python distribution
         run: uv build --project python --out-dir dist
       - name: Check package boundaries
