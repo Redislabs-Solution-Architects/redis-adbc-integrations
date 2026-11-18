@@ -1,0 +1,131 @@
+name: Framework integrations
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '27 9 * * *'
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrations-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REDIS_ADBC_TELEMETRY_DISABLED: 'true'
+  RAY_USAGE_STATS_ENABLED: '0'
+  PREFECT_SERVER_ANALYTICS_ENABLED: 'false'
+  RUNTIME__DLTHUB_TELEMETRY: 'false'
+
+jobs:
+  helpers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Check owned TLS worker lifecycle
+        run: python -m unittest discover -s scripts -v
+
+  integrations:
+    name: ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [analytics, airflow, ray]
+    env:
+      SSL_CERT_DIR: /etc/ssl/certs
+      RUN_AIRFLOW_TESTS: '1'
+      RUN_RAY_TESTS: '1'
+      AIRFLOW_HOME: /tmp/redis-airflow-home
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      PREFECT_HOME: /tmp/redis-prefect-home
+    steps:
+      - uses: actions/checkout@v7
+      - name: Initialize pinned driver
+        run: git submodule update --init --depth 1 driver
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: driver/go/go.mod
+          cache-dependency-path: driver/go/go.sum
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Install isolated framework environment
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          uv venv --python 3.14 .venv
+          uv pip install --python .venv/bin/python ./driver/python "./python[$SUITE-tests]"
+      - name: Build fixture driver
+        run: make -C driver/go build
+      - name: Start verified Software fixture
+        run: make -C driver/go redis-up
+      - name: Exercise framework contracts
+        env:
+          SUITE: ${{ matrix.suite }}
+          REDIS_ADBC_LIBRARY: ${{ github.workspace }}/driver/go/build/libadbc_driver_redis.so
+        run: |
+          case "$SUITE" in
+            analytics) tests=(dagster dagster_adbc dask dask_write prefect dlt) ;;
+            airflow) tests=(airflow airflow_hook) ;;
+            ray) tests=(ray ray_arrow) ;;
+            *) exit 2 ;;
+          esac
+          paths=()
+          for test in "${tests[@]}"; do paths+=("$PWD/python/tests/test_$test.py"); done
+          bash driver/go/software-setup.sh --exec "$PWD/.venv/bin/python" -m pytest -q -ra --tb=short             --junitxml="$PWD/framework-results.xml" "${paths[@]}"
+      - name: Verify independent Ray worker TLS trust
+        if: matrix.suite == 'ray'
+        env:
+          PYTHON: ${{ github.workspace }}/.venv/bin/python
+          CANDIDATE_JUNIT_XML: ${{ github.workspace }}/ray-tls-results.xml
+        run: python/scripts/run-ray-tls-candidates.sh
+      - name: Upload framework results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: framework-${{ matrix.suite }}
+          path: '*results.xml'
+          if-no-files-found: warn
+      - name: Remove owned fixture
+        if: always()
+        run: docker compose -f driver/go/compose.yaml down --volumes
+
+  package:
+    needs: [helpers, integrations]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Stamp independent release version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: uv version --project python "${RELEASE_TAG#v}"
+      - name: Build independent Python distribution
+        run: uv build --project python --out-dir dist
+      - name: Check package boundaries
+        run: python3 scripts/check_package.py dist/*.whl
+      - name: Checksum packages
+        run: cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-distribution
+          path: dist/
+      - name: Publish release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber

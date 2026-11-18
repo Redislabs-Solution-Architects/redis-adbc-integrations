@@ -1,0 +1,4 @@
+[submodule "driver"]
+	path = driver
+	url = https://github.com/redis/redis-adbc-driver.git
+	shallow = true
