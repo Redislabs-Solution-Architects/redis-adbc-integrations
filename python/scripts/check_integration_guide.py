@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--require-read-write", action="store_true")
     args = parser.parse_args()
     if args.tool == "superset":
-        parser.error("Superset 6.1 is unsupported on Python 3.14+; https://github.com/redis/redis-adbc-driver/issues/471")
+        parser.error("Superset 6.1 is unsupported on Python 3.14+; see docs/integrations/superset.md")
     if not os.environ.get("REDIS_URI"):
         parser.error("set REDIS_URI using the verified Software setup runner")
     if args.require_read_write:

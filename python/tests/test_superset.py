@@ -2,7 +2,8 @@
 
 Set RUN_SUPERSET_TESTS=1. Uses a temporary metadata SQLite database, never an
 existing Superset installation. Requires a Python 3.14+ compatible upstream
-Superset dependency set; restoration is tracked in project issue #471.
+Superset dependency set. Driver issue #471 is closed with no Superset 7.x run
+recorded; requalification checks are in docs/integrations/superset.md.
 """
 
 import os
