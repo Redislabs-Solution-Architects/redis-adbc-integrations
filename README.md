@@ -24,7 +24,9 @@ Choose extras `airflow`, `dagster`, `dask`, `ray`, `prefect` or `dlt`. Install
 Airflow in a separate environment from Prefect because of conflicting framework
 dependencies. `superset` retains the previous 6.1 dependency target for future
 requalification: **Superset 6.1 is unsupported on Python 3.14+**, blocked by
-[upstream dependencies](https://github.com/redis/redis-adbc-driver/issues/471).
+upstream dependencies. Driver [issue #471](https://github.com/redis/redis-adbc-driver/issues/471)
+is closed with no Superset 7.x run recorded; see
+[the Superset guide](docs/integrations/superset.md) for the requalification checks.
 It is excluded from passing CI coverage; moving it does not restore support.
 
 ## Migration
