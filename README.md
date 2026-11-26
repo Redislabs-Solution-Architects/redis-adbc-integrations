@@ -8,8 +8,8 @@ The driver, DBAPI, Arrow, native reads and SQLAlchemy dialect remain upstream.
 
 No release of this extracted distribution has been published yet. Use an
 isolated Python 3.14 environment. Each worker needs the driver and its framework
-integration installed. The pinned driver submodule provides a reproducible source
-build until a matching core wheel is released:
+integration installed. The pinned driver submodule (driver release `v0.0.31`)
+provides the reproducible source build that CI tests:
 
 ```sh
 git clone https://github.com/Redislabs-Solution-Architects/redis-adbc-integrations.git
@@ -78,8 +78,14 @@ an unavailable Superset dependency set is a blocker, not a passing check.
 
 Extracted from `redis/redis-adbc-driver` at
 `cacae16c637bd5459a43f9e794e8c80f7fafa08f`, retaining Apache-2.0 notices. The
-`driver` gitlink pins the source used by CI and local fixtures. Update it
-explicitly to test a newer driver. No native driver source is vendored into
+`driver` gitlink pins the source used by CI and local fixtures; it currently
+points at driver release `v0.0.31`, matching the `adbc-driver-redis>=0.0.31`
+requirement. Update it explicitly to move push, pull request and release runs
+to a newer driver. The nightly scheduled run instead builds and tests the latest
+upstream driver `main`, so a driver change that breaks an integration shows up
+before the next pin update; a manual run can test another driver branch or tag
+through the `driver_ref` input. CI builds the driver from source and does not
+test the published PyPI wheel. No native driver source is vendored into
 this Python distribution, and its namespace does not overlap the core package.
 
 A published GitHub release runs all supported integration jobs before attaching
