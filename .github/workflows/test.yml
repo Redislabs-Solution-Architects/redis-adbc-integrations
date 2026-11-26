@@ -4,9 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly runs test the latest upstream driver main; pushes, pull requests
+  # and releases test the pinned driver/ submodule.
   schedule:
     - cron: '27 9 * * *'
   workflow_dispatch:
+    inputs:
+      driver_ref:
+        description: Upstream driver branch or tag to test instead of the pin (empty = pinned driver/)
+        required: false
+        default: ''
+        type: string
   release:
     types: [published]
 
@@ -65,6 +73,16 @@ jobs:
       - uses: actions/checkout@v7
       - name: Initialize pinned driver
         run: git submodule update --init --depth 1 driver
+      - name: Select driver revision
+        env:
+          DRIVER_REF: ${{ github.event_name == 'schedule' && 'main' || inputs.driver_ref }}
+        run: |
+          if [ -n "$DRIVER_REF" ]; then
+            [[ "$DRIVER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || { echo "invalid driver_ref: $DRIVER_REF" >&2; exit 2; }
+            git -C driver fetch --depth 1 origin "$DRIVER_REF"
+            git -C driver checkout --detach FETCH_HEAD
+          fi
+          echo "Driver under test: $(git -C driver rev-parse HEAD) (${DRIVER_REF:-pinned $(git rev-parse HEAD:driver)})" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-go@v7
         with:
           go-version-file: driver/go/go.mod

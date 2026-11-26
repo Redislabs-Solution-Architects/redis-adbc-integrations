@@ -9,7 +9,7 @@ description = "Optional framework adapters for the Redis ADBC driver"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
-dependencies = ["adbc-driver-redis[dbapi]>=0.1.0"]
+dependencies = ["adbc-driver-redis[dbapi]>=0.0.31"]
 
 [project.urls]
 Homepage = "https://github.com/Redislabs-Solution-Architects/redis-adbc-integrations"
