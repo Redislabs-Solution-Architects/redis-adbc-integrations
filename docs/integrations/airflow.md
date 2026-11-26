@@ -8,6 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
+**Default mode: live.** Airflow is in the orchestration group, so it defaults to the
+driver's live mode; only read-heavy BI and visualization integrations default to
+managed tables. Live mode sets `adbc.redis.live_tables=true` and
+`adbc.redis.schema_ownership=live`: tables in `redis_live` and other live schemas
+store each row as an application-owned HASH that Redis clients can read and
+write directly. Live reads have no statement snapshot, writes apply per row,
+and a row whose values are all NULL is refused. `DROP TABLE` only unregisters a
+live table and keeps its HASHes, so delete the rows first. `RedisAdbcHook` connections enable live tables by default; set connection extras `"mode": "managed"` for managed-only connections. SQL you write still chooses its tables: `CREATE TABLE redis_live.t (...)` creates a live table, while an unqualified name stays in the managed `public` schema. Use
+managed mode for statement snapshots, and on Redis Flex, which does not support
+live tables. See [driver modes](../../README.md#driver-modes).
+
 Install the integration from PyPI; its version matches the driver release it
 requires, so pip also installs that `adbc-driver-redis` wheel:
 
@@ -70,14 +81,17 @@ from redis_adbc_integrations.airflow import RedisAdbcHook
 from uuid import uuid4
 hook = RedisAdbcHook(adbc_conn_id="redis_analytics")
 name = "guide_airflow_" + uuid4().hex
+table = f"redis_live.{name}"  # a live table: rows are HASHes under redis_live:<name>:
 try:
-    hook.run(f'CREATE TABLE "{name}" (id integer, label text)')
-    hook.insert_rows(name, [(1, "雪"), (2, None)], autocommit=True)
-    records = hook.get_records(f'SELECT * FROM "{name}" WHERE id >= $1 ORDER BY id', parameters=(1,))
+    hook.run(f"CREATE TABLE {table} (id integer, label text)")
+    hook.insert_rows(table, [(1, "雪"), (2, None)], autocommit=True)
+    records = hook.get_records(f"SELECT * FROM {table} WHERE id >= $1 ORDER BY id", parameters=(1,))
     assert records == [(1, "雪"), (2, None)]
     print("REDIS_ADBC_READ_WRITE_OK")
 finally:
-    hook.run(f'DROP TABLE IF EXISTS "{name}"')
+    # DROP TABLE keeps live HASHes; delete the rows first.
+    hook.run(f"DELETE FROM {table}")
+    hook.run(f"DROP TABLE IF EXISTS {table}")
 ```
 
 Create an Airflow connection named `redis_analytics` with type `redis_adbc` (display name **Redis ADBC**) and extras:

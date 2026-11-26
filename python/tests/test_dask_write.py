@@ -16,6 +16,7 @@ from distributed import Client, LocalCluster
 
 from adbc_driver_redis import dbapi
 from redis_adbc_integrations.dask import PartitionWriteError, write_dataframe
+from redis_adbc_integrations.modes import connect as mode_connect
 
 SCHEMA = pa.schema([("id", pa.int64()), ("label", pa.string())])
 SOURCE = pa.table({"id": [1, None, 3], "label": ["雪", None, "last"]}, schema=SCHEMA)
@@ -37,13 +38,18 @@ def source_frame():
     )
 
 
+@pytest.mark.parametrize("write_mode,target_schema,options", [
+    (None, "redis_live", {"adbc.redis.live_tables": "true", "adbc.redis.schema_ownership": "live"}),
+    ("live", "analytics", {"adbc.redis.live_tables": "true", "adbc.redis.schema_ownership": "live"}),
+    ("managed", "public", {"adbc.redis.live_tables": "false"}),
+])
 @pytest.mark.parametrize("failure", [None, "convert", "ingest", "count", "close"])
-def test_lazy_append_counts_and_cleanup(monkeypatch, failure):
+def test_lazy_append_counts_and_cleanup(monkeypatch, failure, write_mode, target_schema, options):
     events, written = [], []
 
     class Cursor:
         def adbc_ingest(self, table, data, *, mode, db_schema_name):
-            assert (table, mode, db_schema_name) == ("target", "append", "public")
+            assert (table, mode, db_schema_name) == ("target", "append", target_schema)
             index = len(written)
             written.append(data)
             events.append(("write", index, data.num_rows))
@@ -63,7 +69,7 @@ def test_lazy_append_counts_and_cleanup(monkeypatch, failure):
 
     @contextmanager
     def connect(uri, *, db_kwargs, conn_kwargs):
-        assert (uri, db_kwargs, conn_kwargs) == ("unused", {"x": "y"}, {})
+        assert (uri, db_kwargs, conn_kwargs) == ("unused", {"x": "y", **options}, {})
         events.append("connected")
         try:
             yield Connection()
@@ -79,8 +85,9 @@ def test_lazy_append_counts_and_cleanup(monkeypatch, failure):
         second = pd.DataFrame({"id": ["not an integer"], "label": ["bad"]})
     frame = frame_from_parts([first, second])
     job = write_dataframe(
-        frame, "unused", "target", schema=SCHEMA, db_schema_name="public",
-        allow_duplicate_writes=True, db_kwargs={"x": "y"},
+        frame, "unused", "target", schema=SCHEMA,
+        db_schema_name=None if write_mode is None else target_schema,
+        allow_duplicate_writes=True, db_kwargs={"x": "y"}, mode=write_mode,
     )
     assert events == []
     layers = job.__dask_graph__().layers
@@ -145,6 +152,8 @@ def test_empty_partition_is_validated_on_target(monkeypatch):
     ({"table": ""}, ValueError),
     ({"table": "bad" + chr(0)}, ValueError),
     ({"db_schema_name": ""}, ValueError),
+    ({"mode": "snapshot"}, ValueError),
+    ({"mode": "managed", "db_kwargs": {"adbc.redis.live_tables": "true"}}, ValueError),
 ])
 def test_writer_refuses_invalid_inputs(overrides, error):
     options = dict(frame=source_frame(), uri="unused", table="target", schema=SCHEMA,
@@ -195,7 +204,7 @@ def test_distributed_arrow_appends_and_failure(uri):
                 # Pin consecutive evaluations to different worker processes.
                 for worker in workers:
                     job = write_dataframe(source_frame(), uri, table, schema=SCHEMA,
-                                          allow_duplicate_writes=True)
+                                          allow_duplicate_writes=True, mode="managed")
                     future = client.compute(job, workers=[worker], allow_other_workers=False)
                     assert future.result() == 3
                     assert client.run_on_scheduler(
@@ -210,7 +219,7 @@ def test_distributed_arrow_appends_and_failure(uri):
                 bad = pd.DataFrame({"id": ["not an integer"], "label": ["bad"]})
                 never = SOURCE.slice(2).to_pandas(types_mapper=pd.ArrowDtype)
                 job = write_dataframe(frame_from_parts([good, bad, never]), uri, table,
-                                      schema=SCHEMA, allow_duplicate_writes=True)
+                                      schema=SCHEMA, allow_duplicate_writes=True, mode="managed")
                 with pytest.raises(PartitionWriteError) as caught:
                     client.compute(job, workers=[workers[0]], allow_other_workers=False).result()
                 assert caught.value.partition_index == 1
@@ -223,7 +232,7 @@ def test_distributed_arrow_appends_and_failure(uri):
                 # A real native append refusal must not consume later partitions or delete prior data.
                 missing = "missing_" + uuid.uuid4().hex
                 job = write_dataframe(source_frame(), uri, missing, schema=SCHEMA,
-                                      allow_duplicate_writes=True)
+                                      allow_duplicate_writes=True, mode="managed")
                 with pytest.raises(PartitionWriteError) as caught:
                     client.compute(job, workers=[workers[1]], allow_other_workers=False).result()
                 assert caught.value.partition_index == 0
@@ -253,7 +262,7 @@ def test_distributed_arrow_appends_and_failure(uri):
                         for part in [typed.slice(0, 1), typed.slice(0, 0), typed.slice(1)]]
                     frame = dd.from_delayed(parts, meta=meta)
                     job = write_dataframe(frame, uri, typed_name, schema=typed.schema,
-                                          allow_duplicate_writes=True)
+                                          allow_duplicate_writes=True, mode="managed")
                     assert client.compute(job, workers=[workers[1]],
                                           allow_other_workers=False).result() == 3
                     with dbapi.connect(uri) as fresh, fresh.cursor() as check:
@@ -264,3 +273,29 @@ def test_distributed_arrow_appends_and_failure(uri):
                     cur.execute(f'DROP TABLE "{typed_name}"')
         finally:
             cur.execute(f'DROP TABLE "{table}"')
+
+
+def test_live_append_default(uri, live_table):
+    rows = pa.table({"id": [1, 2, 3], "label": ["雪", None, "last"]}, schema=SCHEMA)
+    name = live_table(SCHEMA.empty_table())
+    frame = frame_from_parts([
+        rows.slice(0, 2).to_pandas(types_mapper=pd.ArrowDtype),
+        SCHEMA.empty_table().to_pandas(types_mapper=pd.ArrowDtype),
+        rows.slice(2).to_pandas(types_mapper=pd.ArrowDtype),
+    ])
+    job = write_dataframe(frame, uri, name, schema=SCHEMA, allow_duplicate_writes=True)
+    assert job.compute(scheduler="synchronous") == 3
+    with mode_connect(uri, "dask") as conn, conn.cursor() as cur:
+        cur.execute(f'SELECT id, label FROM redis_live."{name}" ORDER BY id')
+        assert cur.fetch_arrow_table().equals(rows)
+    # A HASH needs at least one field, so an all-NULL row is refused after the
+    # write was attempted; earlier rows stay.
+    empty = pa.table({"id": [None], "label": [None]}, schema=SCHEMA)
+    job = write_dataframe(frame_from_parts([empty.to_pandas(types_mapper=pd.ArrowDtype)]),
+                          uri, name, schema=SCHEMA, allow_duplicate_writes=True)
+    with pytest.raises(PartitionWriteError) as caught:
+        job.compute(scheduler="synchronous")
+    assert caught.value.write_attempted
+    with mode_connect(uri, "dask") as conn, conn.cursor() as cur:
+        cur.execute(f'SELECT count(*) FROM redis_live."{name}"')
+        assert cur.fetchone() == (3,)

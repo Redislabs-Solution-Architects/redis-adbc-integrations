@@ -44,6 +44,39 @@ is closed with no Superset 7.x run recorded; see
 [the Superset guide](docs/integrations/superset.md) for the requalification checks.
 It is excluded from passing CI coverage; moving it does not restore support.
 
+## Driver modes
+
+Each integration defaults to a driver ownership mode chosen by its group:
+
+| Integration | Group | Default mode |
+|---|---|---|
+| Superset | BI and visualization | managed |
+| Airflow, Dagster, Prefect | orchestration | live |
+| Dask, Ray | distributed compute | live |
+| dlt | data loading | live |
+
+Read-heavy groups (BI and visualization) default to **managed** tables: the
+driver owns a private copy and every statement reads a consistent snapshot.
+Every other integration defaults to **live** HASH tables
+(`adbc.redis.live_tables=true` and `adbc.redis.schema_ownership=live`): tables
+in `redis_live` and other live schemas store each row as an application-owned
+HASH that other Redis clients can read and write directly. Live reads have no
+statement snapshot; writes apply per row, so a failure can leave a statement
+partially applied; a row whose values are all NULL is refused; and `DROP TABLE`
+or `DROP SCHEMA … CASCADE` unregisters tables without deleting their HASHes.
+See the driver's [live HASH tables](https://github.com/redis/redis-adbc-driver/blob/main/docs/live-hash-tables.md)
+guide. Live schemas and live SQL DDL require driver 0.0.32 or later.
+
+Override the default with `mode="managed"` or `mode="live"`: on `read_query`,
+`write_dataframe`, `RedisDatasource`, the dlt destination and
+`RedisADBCIOManager`; through connection extras `"mode"` for Airflow; and with
+`redis_adbc_integrations.modes.connect(uri, "prefect", mode=...)` in Prefect
+tasks or other code that opens its own connections. Without `mode`, an explicit
+`adbc.redis.live_tables` database option decides, and `adbc.redis.flex=true`
+selects managed mode because the driver does not support live tables on Flex.
+`redis_adbc_integrations.modes` defines the groups (`GROUPS`,
+`READ_HEAVY_GROUPS`, `default_mode()`), so new integrations follow the same rule.
+
 ## Migration
 
 Install this distribution separately from `adbc-driver-redis`. Replace adapter
@@ -105,7 +138,7 @@ and tests the latest upstream driver `main`, so a driver change that breaks an
 integration shows up before it is released; a manual run can build another
 driver branch or tag through the `driver_ref` input. A new driver release can
 therefore fail CI on an unchanged branch: that is the breakage users would see.
-Once newer releases exist, CI no longer tests the `adbc-driver-redis>=0.0.31`
+Once newer releases exist, CI no longer tests the `adbc-driver-redis>=0.0.32`
 floor itself; raise it when an integration needs newer driver behavior. No
 native driver source is vendored into this Python distribution, and its
 namespace does not overlap the core package.

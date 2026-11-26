@@ -13,11 +13,11 @@ from airflow.models.connection import Connection
 from redis_adbc_integrations.airflow import RedisAdbcHook
 
 
-def make_hook(uri, conn_type="redis_adbc"):
+def make_hook(uri, conn_type="redis_adbc", **extra):
     connection = Connection(
         conn_id="redis_test",
         conn_type=conn_type,
-        extra=json.dumps({"db_kwargs": {"uri": uri}}),
+        extra=json.dumps({"db_kwargs": {"uri": uri}, **extra}),
     )
     return RedisAdbcHook(adbc_conn_id="redis_test", connection=connection)
 
@@ -146,8 +146,68 @@ def test_connection_options(monkeypatch):
     assert hook.get_conn() is connect.return_value
     connect.assert_called_once_with(
         "rediss://localhost:1/0",
-        db_kwargs={"adbc.redis.time_zone": "UTC"},
+        db_kwargs={
+            "adbc.redis.time_zone": "UTC",
+            "adbc.redis.live_tables": "true",
+            "adbc.redis.schema_ownership": "live",
+        },
         conn_kwargs={"adbc.connection.autocommit": "true"},
         entrypoint=None,
     )
     assert hook.db_kwargs["uri"] == "rediss://localhost:1/0"
+    assert "adbc.redis.live_tables" not in hook.db_kwargs
+
+
+LIVE_OPTIONS = {"adbc.redis.live_tables": "true", "adbc.redis.schema_ownership": "live"}
+MANAGED_OPTIONS = {"adbc.redis.live_tables": "false"}
+
+
+@pytest.mark.parametrize("extra,db_kwargs,expected", [
+    ({}, {}, LIVE_OPTIONS),
+    ({"mode": "live"}, {}, LIVE_OPTIONS),
+    ({"mode": "managed"}, {}, MANAGED_OPTIONS),
+    ({}, {"adbc.redis.live_tables": "false"}, MANAGED_OPTIONS),
+    ({}, {"adbc.redis.flex": "true"}, MANAGED_OPTIONS),
+])
+def test_connection_mode(monkeypatch, extra, db_kwargs, expected):
+    from adbc_driver_redis import dbapi
+
+    hook = make_hook("rediss://localhost:1/0", **extra)
+    hook.db_kwargs.update(db_kwargs)
+    connect = Mock()
+    monkeypatch.setattr(dbapi, "connect", connect)
+    hook.get_conn()
+    assert connect.call_args.kwargs["db_kwargs"] == {**db_kwargs, **expected}
+
+
+@pytest.mark.parametrize("extra,db_kwargs", [
+    ({"mode": "snapshot"}, {}),
+    ({"mode": "managed"}, {"adbc.redis.live_tables": "true"}),
+])
+def test_invalid_connection_mode(monkeypatch, extra, db_kwargs):
+    from adbc_driver_redis import dbapi
+
+    hook = make_hook("rediss://localhost:1/0", **extra)
+    hook.db_kwargs.update(db_kwargs)
+    monkeypatch.setattr(dbapi, "connect", Mock(side_effect=AssertionError("connected")))
+    with pytest.raises(ValueError, match="mode|live_tables"):
+        hook.get_conn()
+
+
+def test_live_table_writes(uri):
+    hook = make_hook(uri)
+    name = "it_airflow_live_" + uuid.uuid4().hex
+    table = f"redis_live.{name}"
+    hook.run(f"CREATE TABLE {table} (id BIGINT, name TEXT)")
+    try:
+        hook.insert_rows(table, [(1, "Alice"), (2, None)],
+                         target_fields=["id", "name"], autocommit=True)
+        assert hook.get_records(f"SELECT id, name FROM {table} ORDER BY id") == [
+            (1, "Alice"), (2, None),
+        ]
+        keys = [key for (key,) in hook.get_records(f"SELECT __key FROM {table}")]
+        assert len(keys) == 2
+        assert all(key.startswith(f"redis_live:{name}:") for key in keys)
+    finally:
+        hook.run(f"DELETE FROM {table}")
+        hook.run(f"DROP TABLE IF EXISTS {table}")

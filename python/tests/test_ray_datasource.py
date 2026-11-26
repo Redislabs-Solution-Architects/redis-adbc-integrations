@@ -37,8 +37,12 @@ def release_planned_sources(monkeypatch):
 
 @pytest.fixture
 def db_options():
+    # These suites read managed tables, so select managed mode explicitly.
+    options = {"adbc.redis.live_tables": "false"}
     ca = os.environ.get("REDIS_TLS_CA_FILE")
-    return {"adbc.redis.tls_ca_file": ca} if ca else {}
+    if ca:
+        options["adbc.redis.tls_ca_file"] = ca
+    return options
 
 
 @pytest.fixture(scope="module")
@@ -385,3 +389,21 @@ def test_tls_worker_requires_ca(uri, source, ray_runtime, db_options):
 
     with pytest.raises(ray.exceptions.RayTaskError, match="(?i)(certificate.*(unknown authority|verify|verification)|x509)"):
         ray.get(without_ca.remote(task))
+
+
+def test_live_hash_partitions(uri, live_table, ray_runtime, db_options):
+    data = pa.table({
+        "id": pa.array(range(40), type=pa.int64()),
+        "label": [None if i % 5 == 0 else f"live {i}" for i in range(40)],
+    })
+    name = live_table(data)
+    options = {k: v for k, v in db_options.items() if k != "adbc.redis.live_tables"}
+    # The default live mode partitions the table's original HASH keys.
+    with RedisDatasource(uri, f'SELECT id, label FROM redis_live."{name}" WHERE id >= 10',
+                         partition_count=4, batch_rows=7, db_kwargs=options) as planned:
+        assert planned.mode == "live"
+        assert len(planned.get_read_tasks(1)) == 4
+        rows = collect(ray.data.read_datasource(planned)).to_pylist()
+    assert sorted(rows, key=lambda row: row["id"]) == [
+        row for row in data.to_pylist() if row["id"] >= 10
+    ]

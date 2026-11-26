@@ -2,6 +2,8 @@
 
 Set REDIS_URI to a disposable Redis database with Search. Install the driver
 and PyArrow in every Airflow worker. Only small summaries go through XCom.
+Tasks use Airflow's default live mode: the fixture is a live table in
+``redis_live`` whose rows are HASHes under ``airflow:<table>:``.
 """
 
 from datetime import datetime, timezone
@@ -18,6 +20,18 @@ def table_name():
     return f"airflow_adbc_smoke_{suffix}"
 
 
+def drop_live(cur, table):
+    # DROP TABLE only unregisters a live table; delete its HASHes first.
+    cur.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = 'redis_live' AND table_name = ?",
+        (table,),
+    )
+    if cur.fetchall():
+        cur.execute(f"DELETE FROM redis_live.{table}")
+        cur.execute(f"DROP TABLE redis_live.{table}")
+
+
 @dag(
     dag_id="redis_adbc_smoke",
     schedule=None,
@@ -29,15 +43,19 @@ def table_name():
 def redis_adbc_smoke():
     @task
     def load():
+        import json
         import os
 
         import pyarrow as pa
-        from adbc_driver_redis import dbapi
+        from redis_adbc_integrations.modes import connect
 
         table = table_name()
-        with dbapi.connect(os.environ["REDIS_URI"]) as conn, conn.cursor() as cur:
+        with connect(os.environ["REDIS_URI"], "airflow") as conn, conn.cursor() as cur:
             # Autocommit only. Replacing this run's fixture makes retries safe.
-            cur.execute(f"DROP TABLE IF EXISTS {table}")
+            drop_live(cur, table)
+            cur.adbc_statement.set_options(**{
+                "adbc.redis.ingest.live_source": json.dumps({"prefix": f"airflow:{table}:"}),
+            })
             cur.adbc_ingest(
                 table,
                 pa.table({
@@ -46,6 +64,7 @@ def redis_adbc_smoke():
                     "amount": [10, 20, 30, 40],
                 }),
                 mode="create",
+                db_schema_name="redis_live",
             )
         return {"table": table, "rows": 4}
 
@@ -53,15 +72,15 @@ def redis_adbc_smoke():
     def verify(loaded):
         import os
 
-        from adbc_driver_redis import dbapi
+        from redis_adbc_integrations.modes import connect
 
         table = table_name()
         assert loaded == {"table": table, "rows": 4}, loaded
         # A fresh task-local connection reads the prior task's persisted data.
-        with dbapi.connect(os.environ["REDIS_URI"]) as conn, conn.cursor() as cur:
+        with connect(os.environ["REDIS_URI"], "airflow") as conn, conn.cursor() as cur:
             cur.execute(
                 f"SELECT region, COUNT(*) AS n, SUM(amount) AS total "
-                f"FROM {table} GROUP BY region ORDER BY region"
+                f"FROM redis_live.{table} GROUP BY region ORDER BY region"
             )
             rows = cur.fetch_arrow_table().to_pylist()
             expected = [
@@ -69,7 +88,7 @@ def redis_adbc_smoke():
                 {"region": "US", "n": 2, "total": 40},
             ]
             assert rows == expected, rows
-            cur.execute(f"SELECT id FROM {table} WHERE amount > ? ORDER BY id", [20])
+            cur.execute(f"SELECT id FROM redis_live.{table} WHERE amount > ? ORDER BY id", [20])
             assert cur.fetchall() == [(3,), (4,)]
         print(f"Redis ADBC verified: {loaded['rows']} rows; aggregates={rows}")
         return {"rows": loaded["rows"], "groups": len(rows)}
@@ -78,10 +97,10 @@ def redis_adbc_smoke():
     def cleanup():
         import os
 
-        from adbc_driver_redis import dbapi
+        from redis_adbc_integrations.modes import connect
 
-        with dbapi.connect(os.environ["REDIS_URI"]) as conn, conn.cursor() as cur:
-            cur.execute(f"DROP TABLE IF EXISTS {table_name()}")
+        with connect(os.environ["REDIS_URI"], "airflow") as conn, conn.cursor() as cur:
+            drop_live(cur, table_name())
 
     loaded = load()
     checked = verify(loaded)

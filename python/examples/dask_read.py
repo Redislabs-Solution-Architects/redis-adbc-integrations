@@ -1,12 +1,13 @@
 """Run against a disposable Redis with Search: python python/examples/dask_read.py."""
 
+import json
 import os
 import uuid
 
 import pandas as pd
 import pyarrow as pa
-from adbc_driver_redis import dbapi
 from redis_adbc_integrations.dask import read_query
+from redis_adbc_integrations.modes import connect
 from distributed import Client, LocalCluster
 
 
@@ -19,7 +20,8 @@ def main():
         schema=schema,
     )
     # A bound boolean selects the NULL partition without interpolating values.
-    query = f'SELECT id, name FROM "{table}" WHERE (id >= ? AND id < ?) OR (id IS NULL AND ?)'
+    query = (f'SELECT id, name FROM redis_live."{table}" '
+             "WHERE (id >= ? AND id < ?) OR (id IS NULL AND ?)")
     partitions = [
         (-2, 0, False),
         (0, 2, False),
@@ -27,8 +29,12 @@ def main():
         (4, 6, False),
         (0, 0, True),
     ]
-    with dbapi.connect(uri) as conn, conn.cursor() as cur:
-        cur.adbc_ingest(table, source, mode="create")
+    # Live mode (the default) reads application-owned HASHes under example:<table>:.
+    with connect(uri, "dask") as conn, conn.cursor() as cur:
+        cur.adbc_statement.set_options(**{
+            "adbc.redis.ingest.live_source": json.dumps({"prefix": f"example:{table}:"}),
+        })
+        cur.adbc_ingest(table, source, mode="create", db_schema_name="redis_live")
         try:
             frame = read_query(uri, query, partitions, schema=schema)
             with (
@@ -55,7 +61,9 @@ def main():
             # Local, materialized result sink; read_query remains a reader API.
             write_result(pa.Table.from_pandas(result, preserve_index=False))
         finally:
-            cur.execute(f'DROP TABLE "{table}"')
+            # DROP TABLE keeps live HASHes; delete the rows first.
+            cur.execute(f'DELETE FROM redis_live."{table}"')
+            cur.execute(f'DROP TABLE redis_live."{table}"')
 
 
 if __name__ == "__main__":

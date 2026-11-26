@@ -9,6 +9,8 @@ import pyarrow as pa
 
 from adbc_driver_redis import dbapi
 
+from .modes import LIVE, LIVE_SCHEMA, driver_options, resolve_mode
+
 
 class PartitionWriteError(RuntimeError):
     """A failed append and the preceding tasks' acknowledged row count.
@@ -62,9 +64,17 @@ def _append_partition(
 
 def write_dataframe(
     frame, uri, table, *, schema, db_schema_name=None, allow_duplicate_writes=False,
-    db_kwargs=None, conn_kwargs=None,
+    db_kwargs=None, conn_kwargs=None, mode=None,
 ):
     """Build a lazy worker-local Arrow append into an existing table.
+
+    ``mode`` defaults to ``"live"``: the target is a live HASH table in
+    ``db_schema_name`` (default ``redis_live``) or another live schema, and each
+    row becomes one application-owned HASH under the table's registered prefix.
+    Every row needs at least one non-NULL column; keys come from a string
+    ``__key`` column or are generated. Naming a managed schema's table appends to
+    that managed table. Pass ``mode="managed"`` to append to a managed table in
+    the driver's default schema when ``db_schema_name`` is omitted.
 
     Each partition opens and closes its own connection/cursor. Appends form a
     sequential dependency chain; each write converts one partition. Dask controls
@@ -103,6 +113,10 @@ def write_dataframe(
             raise ValueError("table and schema names must be nonempty strings without NUL")
     if table is None:
         raise ValueError("table must be a nonempty string")
+    mode = resolve_mode("dask", mode, db_kwargs)
+    if mode == LIVE and db_schema_name is None:
+        db_schema_name = LIVE_SCHEMA
+    db_kwargs = driver_options(mode, db_kwargs)
     partitions = frame.to_delayed()
     count = 0
     with annotate(retries=0):
@@ -110,7 +124,7 @@ def write_dataframe(
             count = delayed(_append_partition, pure=False)(
                 partition, count, partition_index=index, uri=uri, table=table,
                 schema=schema, db_schema_name=db_schema_name,
-                db_kwargs=dict(db_kwargs or {}), conn_kwargs=dict(conn_kwargs or {}),
+                db_kwargs=dict(db_kwargs), conn_kwargs=dict(conn_kwargs or {}),
             )
     return count
 
@@ -130,7 +144,9 @@ def _fetch_partition(parameters, *, uri, query, schema, db_kwargs, conn_kwargs):
     return table.to_pandas(types_mapper=pd.ArrowDtype)
 
 
-def read_query(uri, query, partitions, *, schema, db_kwargs=None, conn_kwargs=None):
+def read_query(
+    uri, query, partitions, *, schema, db_kwargs=None, conn_kwargs=None, mode=None,
+):
     """Build a lazy DataFrame from one parameterized SELECT per partition.
 
     ``partitions`` is a nonempty iterable of positional parameter sequences for
@@ -144,6 +160,11 @@ def read_query(uri, query, partitions, *, schema, db_kwargs=None, conn_kwargs=No
     Arrow dtypes and unknown Dask index divisions. A partition is materialized
     in worker memory; reads and retries have no cross-partition snapshot.
     Install the package's ``dask`` extra and native driver on every worker.
+
+    ``mode`` defaults to ``"live"``, so queries can read ``redis_live`` tables as
+    well as managed ones. Live rows have no statement snapshot: application writes
+    can interleave with each partition's read. Pass ``mode="managed"`` for
+    managed-only connections.
     """
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a nonempty SQL string")
@@ -156,6 +177,7 @@ def read_query(uri, query, partitions, *, schema, db_kwargs=None, conn_kwargs=No
         parameters.append(tuple(partition))
     if not parameters:
         raise ValueError("partitions must contain at least one parameter sequence")
+    options = driver_options(resolve_mode("dask", mode, db_kwargs), db_kwargs)
     meta = schema.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
     return dd.from_map(
         _fetch_partition,
@@ -163,7 +185,7 @@ def read_query(uri, query, partitions, *, schema, db_kwargs=None, conn_kwargs=No
         uri=uri,
         query=query,
         schema=schema,
-        db_kwargs=dict(db_kwargs or {}),
+        db_kwargs=options,
         conn_kwargs=dict(conn_kwargs or {}),
         meta=meta,
         enforce_metadata=True,

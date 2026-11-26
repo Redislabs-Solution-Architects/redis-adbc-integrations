@@ -6,6 +6,7 @@ import pyarrow as pa
 import pytest
 from adbc_driver_redis import dbapi
 from redis_adbc_integrations.dagster import RedisADBCIOManager, _quote
+from redis_adbc_integrations.modes import connect as mode_connect
 from dagster import (
     AssetIn,
     AssetKey,
@@ -20,22 +21,28 @@ from dagster import (
 from dagster._core.types.dagster_type import resolve_dagster_type
 
 
-@pytest.fixture
-def io(uri):
-    manager = RedisADBCIOManager(uri=uri, schema_name="it_python_dagster")
-    yield manager
-    with dbapi.connect(uri) as conn, conn.cursor() as cur:
-        cur.execute("DROP SCHEMA IF EXISTS it_python_dagster CASCADE")
+@pytest.fixture(params=["live", "managed"])
+def io(request, uri, schema_cleanup):
+    schema_cleanup("it_python_dagster")
+    return RedisADBCIOManager(
+        uri=uri, schema_name="it_python_dagster", mode=request.param
+    )
+
+
+def connect(manager):
+    return mode_connect(manager.uri, "dagster", mode=manager.mode)
 
 
 def output(name, **kwargs):
     return build_output_context(asset_key=AssetKey([name]), **kwargs)
 
 
+@pytest.mark.parametrize("mode", ["live", "managed"])
 @pytest.mark.parametrize("schema_name", [None, "fixed"])
 @pytest.mark.parametrize(
     "left,right",
     [
+        (["orders"], ["redis_live", "orders"]),
         (["a_b", "c", "orders"], ["a", "b_c", "orders"]),
         (["a_b", "orders"], ["a", "b", "orders"]),
         (["a", "orders"], ["b", "orders"]),
@@ -47,8 +54,8 @@ def output(name, **kwargs):
         (["Orders"], ["dagster__4f7264657273"]),
     ],
 )
-def test_distinct_asset_names(schema_name, left, right):
-    manager = RedisADBCIOManager(uri="redis://unused", schema_name=schema_name)
+def test_distinct_asset_names(mode, schema_name, left, right):
+    manager = RedisADBCIOManager(uri="redis://unused", schema_name=schema_name, mode=mode)
     with (
         build_output_context(asset_key=AssetKey(left)) as first,
         build_output_context(asset_key=AssetKey(right)) as second,
@@ -57,45 +64,47 @@ def test_distinct_asset_names(schema_name, left, right):
 
 
 @pytest.mark.parametrize(
-    "path,schema_name,expected",
+    "mode,path,schema_name,expected",
     [
-        (["orders"], None, ("public", "orders")),
-        (["sales", "orders"], None, ("sales", "orders")),
-        (["orders"], "fixed", ("fixed", "orders")),
-        (["a_b", "c", "orders"], None, ("dagster__615f62_63", "orders")),
-        (["a", "b_c", "orders"], None, ("dagster__61_625f63", "orders")),
-        (["public", "orders"], None, ("dagster__7075626c6963", "orders")),
-        (["sales", "orders"], "FIXED", ("fixed", "dagster__73616c6573_6f7264657273")),
+        ("managed", ["orders"], None, ("public", "orders")),
+        ("managed", ["sales", "orders"], None, ("sales", "orders")),
+        ("managed", ["orders"], "fixed", ("fixed", "orders")),
+        ("managed", ["a_b", "c", "orders"], None, ("dagster__615f62_63", "orders")),
+        ("managed", ["a", "b_c", "orders"], None, ("dagster__61_625f63", "orders")),
+        ("managed", ["public", "orders"], None, ("dagster__7075626c6963", "orders")),
+        ("managed", ["sales", "orders"], "FIXED", ("fixed", "dagster__73616c6573_6f7264657273")),
+        # Live mode is the default; unprefixed assets go to redis_live.
+        (None, ["orders"], None, ("redis_live", "orders")),
+        ("live", ["sales", "orders"], None, ("sales", "orders")),
+        ("live", ["public", "orders"], None, ("dagster__7075626c6963", "orders")),
+        ("live", ["redis_live", "orders"], None, ("dagster__72656469735f6c697665", "orders")),
+        ("live", ["sales", "orders"], "FIXED", ("fixed", "dagster__73616c6573_6f7264657273")),
     ],
 )
-def test_asset_name_mapping(path, schema_name, expected):
-    manager = RedisADBCIOManager(uri="redis://unused", schema_name=schema_name)
+def test_asset_name_mapping(mode, path, schema_name, expected):
+    manager = RedisADBCIOManager(uri="redis://unused", schema_name=schema_name, mode=mode)
     with build_output_context(asset_key=AssetKey(path)) as context:
         assert manager._table(context) == expected
 
 
+@pytest.mark.parametrize("mode", ["live", "managed"])
 @pytest.mark.parametrize("fixed_schema", [False, True])
-def test_colliding_asset_roundtrips(uri, fixed_schema):
+def test_colliding_asset_roundtrips(uri, schema_cleanup, mode, fixed_schema):
     prefix = "it_dagster_" + uuid4().hex
     manager = RedisADBCIOManager(
-        uri=uri, schema_name=prefix if fixed_schema else None
+        uri=uri, schema_name=prefix if fixed_schema else None, mode=mode
     )
     paths = [[prefix + "_a", "b", "orders"], [prefix, "a_b", "orders"]]
-    schemas = set()
-    try:
-        for path, value in zip(paths, [1, 2]):
-            with build_output_context(asset_key=AssetKey(path)) as context:
-                schemas.add(manager._table(context)[0])
-                manager.handle_output(context, pa.table({"id": [value]}))
-        for path, value in zip(paths, [1, 2]):
-            with build_input_context(
-                asset_key=AssetKey(path), dagster_type=resolve_dagster_type(pa.Table)
-            ) as context:
-                assert manager.load_input(context).to_pylist() == [{"id": value}]
-    finally:
-        with dbapi.connect(uri) as conn, conn.cursor() as cur:
-            for schema in schemas:
-                cur.execute(f"DROP SCHEMA IF EXISTS {_quote(schema)} CASCADE")
+    for path, value in zip(paths, [1, 2]):
+        with build_output_context(asset_key=AssetKey(path)) as context:
+            schema = manager._table(context)[0]
+            schema_cleanup(schema)
+            manager.handle_output(context, pa.table({"id": [value]}))
+    for path, value in zip(paths, [1, 2]):
+        with build_input_context(
+            asset_key=AssetKey(path), dagster_type=resolve_dagster_type(pa.Table)
+        ) as context:
+            assert manager.load_input(context).to_pylist() == [{"id": value}]
 
 
 @pytest.mark.parametrize("kind", ["arrow", "reader", "pandas", "polars"])
@@ -131,7 +140,10 @@ def test_roundtrip(io, kind):
         assert (
             sorted(result.to_pylist(), key=lambda row: row["id"]) == table.to_pylist()
         )
-        assert context.get_logged_metadata()["row_count"].value == 2
+        metadata = context.get_logged_metadata()
+        assert metadata["row_count"].value == 2
+        assert metadata["mode"].value == io.mode
+        assert ("key_prefix" in metadata) == (io.mode == "live")
 
 
 def test_materialize_dependencies_and_projection(io):
@@ -166,7 +178,7 @@ def test_static_partition_retries(io):
         assert materialize(
             [static_asset], resources={"redis": io}, partition_key=key
         ).success
-    with dbapi.connect(io.uri) as conn, conn.cursor() as cur:
+    with connect(io) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT part, count(*) FROM it_python_dagster.static_asset GROUP BY part ORDER BY part"
         )
@@ -188,7 +200,7 @@ def test_daily_partition_retries(io):
         assert materialize(
             [daily_asset], resources={"redis": io}, partition_key=key
         ).success
-    with dbapi.connect(io.uri) as conn, conn.cursor() as cur:
+    with connect(io) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM it_python_dagster.daily_asset")
         assert cur.fetchone() == (2,)
 
@@ -212,8 +224,81 @@ def test_failed_stream_preserves_previous(io):
     ) as context:
         result = io.load_input(context)
     assert result.to_pylist() == [{"id": 1}]
-    with dbapi.connect(io.uri) as conn, conn.cursor() as cur:
+    with connect(io) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_schema='it_python_dagster'"
         )
         assert cur.fetchall() == [("safe",)]
+
+
+def test_live_rematerialization_replaces_hashes(uri, schema_cleanup, redis_client):
+    schema = "it_dagster_live_" + uuid4().hex
+    schema_cleanup(schema)
+    manager = RedisADBCIOManager(uri=uri, schema_name=schema)
+    assert manager._mode() == "live"
+    prefixes = []
+    for values in ([1, 2], [3]):
+        with output("events") as context:
+            manager.handle_output(context, pa.table({"id": values}))
+            metadata = context.get_logged_metadata()
+        assert metadata["mode"].value == "live"
+        prefixes.append(metadata["key_prefix"].value)
+        assert prefixes[-1].startswith(f"dagster:{schema}:events:")
+
+    def keys(prefix):
+        return sorted(redis_client.scan_iter(match=prefix.encode() + b"*", count=1000))
+
+    first, second = prefixes
+    assert first != second
+    # The previous version's HASHes are deleted, not merely unregistered.
+    assert keys(first) == []
+    new_keys = keys(second)
+    assert len(new_keys) == 1
+    assert redis_client.type(new_keys[0]) == b"hash"
+    assert b"id" in redis_client.hgetall(new_keys[0])
+    with connect(manager) as conn, conn.cursor() as cur:
+        cur.execute(f'SELECT __key, id FROM "{schema}".events')
+        assert cur.fetchall() == [(new_keys[0].decode(), 3)]
+        cur.execute(
+            "SELECT table_name, key_prefix FROM information_schema.tables "
+            "WHERE table_schema = ?", (schema,),
+        )
+        assert cur.fetchall() == [("events", second)]
+
+
+def test_live_mode_refuses_managed_schema(uri, schema_cleanup):
+    schema = "it_dagster_managed_" + uuid4().hex
+    schema_cleanup(schema)
+    with dbapi.connect(uri) as conn, conn.cursor() as cur:
+        cur.execute(f'CREATE SCHEMA "{schema}"')
+    manager = RedisADBCIOManager(uri=uri, schema_name=schema)
+    with output("orders") as context, pytest.raises(dbapi.Error, match="live schema"):
+        manager.handle_output(context, pa.table({"id": [1]}))
+    with connect(manager) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+            (schema,),
+        )
+        assert cur.fetchall() == []
+
+
+def test_live_partition_refuses_managed_table_before_delete(uri, schema_cleanup):
+    schema = "it_dagster_mixed_" + uuid4().hex
+    schema_cleanup(schema)
+    partitions = StaticPartitionsDefinition(["a", "b"])
+
+    @asset(io_manager_key="redis", partitions_def=partitions,
+           metadata={"partition_expr": "part"})
+    def mixed(context) -> pa.Table:
+        return pa.table({"part": [context.partition_key], "n": [1]})
+
+    managed = RedisADBCIOManager(uri=uri, schema_name=schema, mode="managed")
+    assert materialize([mixed], resources={"redis": managed}, partition_key="a").success
+    live = RedisADBCIOManager(uri=uri, schema_name=schema)
+    result = materialize([mixed], resources={"redis": live}, partition_key="a",
+                         raise_on_error=False)
+    assert not result.success
+    # The refusal precedes DELETE, so the managed partition is intact.
+    with connect(managed) as conn, conn.cursor() as cur:
+        cur.execute(f'SELECT part, n FROM "{schema}".mixed')
+        assert cur.fetchall() == [("a", 1)]

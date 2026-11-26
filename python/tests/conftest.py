@@ -1,7 +1,47 @@
+import json
 import os
+from uuid import uuid4
 
 import pytest
 from adbc_driver_redis import dbapi
+from redis_adbc_integrations.modes import LIVE_SCHEMA, connect as mode_connect
+
+
+def quote(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
+def live_connect(uri):
+    """A connection that can see and modify live and managed tables."""
+    # The Ray TLS candidate run trusts its private CA only through this option.
+    ca = os.environ.get("REDIS_TLS_CA_FILE")
+    options = {"adbc.redis.tls_ca_file": ca} if ca else None
+    return mode_connect(uri, "dagster", mode="live", db_kwargs=options)
+
+
+def delete_and_drop(cur, schema, table):
+    """Remove a live table's HASHes, then unregister it (DROP TABLE keeps HASHes)."""
+    target = f"{quote(schema)}.{quote(table)}"
+    cur.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+        (schema, table),
+    )
+    if cur.fetchall():
+        cur.execute(f"DELETE FROM {target}")
+        cur.execute(f"DROP TABLE {target}")
+
+
+def drop_schema(uri, schema):
+    """Drop a live or managed schema without leaving live HASHes behind."""
+    with live_connect(uri) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+            (schema,),
+        )
+        for (table,) in cur.fetchall():
+            delete_and_drop(cur, schema, table)
+        if schema != LIVE_SCHEMA:
+            cur.execute(f"DROP SCHEMA IF EXISTS {quote(schema)} CASCADE")
 
 
 @pytest.fixture
@@ -40,6 +80,52 @@ def workflow_rows(connection):
     finally:
         with connection.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS "{name}"')
+
+
+@pytest.fixture
+def schema_cleanup(uri):
+    """Register schemas to drop (rows first) when the test finishes."""
+    schemas = []
+    yield schemas.append
+    for schema in reversed(schemas):
+        drop_schema(uri, schema)
+
+
+@pytest.fixture
+def live_table(uri):
+    """Create live tables with Arrow; delete their rows and unregister them afterwards."""
+    created = []
+
+    def create(data, *, schema=LIVE_SCHEMA, name=None, index_columns="*"):
+        name = name or "it_live_" + uuid4().hex
+        created.append((schema, name))
+        with live_connect(uri) as conn, conn.cursor() as cur:
+            cur.adbc_statement.set_options(**{
+                "adbc.redis.ingest.index_columns": index_columns,
+                "adbc.redis.ingest.live_source": json.dumps({"prefix": f"it:{name}:"}),
+            })
+            cur.adbc_ingest(name, data, mode="create", db_schema_name=schema)
+        return name
+
+    yield create
+    with live_connect(uri) as conn, conn.cursor() as cur:
+        for schema, name in reversed(created):
+            delete_and_drop(cur, schema, name)
+
+
+@pytest.fixture
+def redis_client(uri):
+    """A raw Redis client for checking application-owned HASHes directly."""
+    redis = pytest.importorskip("redis")
+    options = {"decode_responses": False}
+    ca = os.environ.get("REDIS_TLS_CA_FILE") or os.environ.get("SSL_CERT_FILE")
+    if uri.startswith("rediss://") and ca:
+        options["ssl_ca_certs"] = ca
+    client = redis.Redis.from_url(uri, **options)
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 def pytest_sessionstart(session):

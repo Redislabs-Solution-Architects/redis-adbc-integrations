@@ -5,6 +5,7 @@ from uuid import uuid4
 import pyarrow as pa
 import pytest
 from adbc_driver_redis import dbapi
+from redis_adbc_integrations.modes import connect as mode_connect
 
 pytest.importorskip("prefect")
 from prefect import flow, task
@@ -118,3 +119,28 @@ def test_driver_error_fails_flow(uri, table_name):
     with dbapi.connect(uri) as conn, conn.cursor() as cur:
         cur.execute("SELECT 1")
         assert cur.fetchall() == [(1,)]
+
+
+def test_live_flow_roundtrip(uri, prefect_backend, live_table):
+    data = pa.table({"id": [1, 2, 3], "label": ["a", None, "雪"]})
+    name = live_table(data.schema.empty_table())
+
+    @task(cache_policy=NO_CACHE, persist_result=False)
+    def load():
+        # Prefect's default mode is live: rows become application-owned HASHes.
+        with mode_connect(uri, "prefect") as conn, conn.cursor() as cur:
+            return cur.adbc_ingest(name, data, mode="append", db_schema_name="redis_live")
+
+    @task(cache_policy=NO_CACHE, persist_result=False)
+    def read(count):
+        with mode_connect(uri, "prefect") as conn, conn.cursor() as cur:
+            cur.execute(f'SELECT id, label FROM redis_live."{name}" ORDER BY id')
+            return count, cur.fetch_arrow_table()
+
+    @flow(persist_result=False)
+    def pipeline():
+        return read.submit(load.submit()).result()
+
+    count, result = pipeline()
+    assert count == 3
+    assert result.to_pylist() == data.to_pylist()

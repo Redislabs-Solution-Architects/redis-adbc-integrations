@@ -15,6 +15,8 @@ except ModuleNotFoundError as exc:
 
 from adbc_driver_redis import dbapi
 
+from .modes import driver_options, resolve_mode
+
 
 def _require_autocommit(autocommit):
     if not autocommit:
@@ -25,6 +27,11 @@ def _require_autocommit(autocommit):
 
 class RedisAdbcHook(AdbcHook):
     """Use a ``redis_adbc`` connection with a Redis URI in extras.db_kwargs.
+
+    Connections default to live mode, so SQL can read and write the
+    application-owned HASH tables registered in ``redis_live`` as well as managed
+    tables. Set extras ``"mode": "managed"`` to open managed-only connections, for
+    example on Redis Flex, which does not support live tables.
 
     Inherited ``get_records`` and ``get_first`` use ``run`` with autocommit
     enabled. Explicit transaction requests are rejected. For inherited
@@ -51,8 +58,15 @@ class RedisAdbcHook(AdbcHook):
     def dialect_name(self):
         return self.connection_extra_lower.get("dialect", "redis")
 
+    @cached_property
+    def mode(self):
+        """``live`` unless connection extras select ``managed``."""
+        return resolve_mode(
+            "airflow", self.connection_extra_lower.get("mode"), self.db_kwargs
+        )
+
     def get_conn(self):
-        options = dict(self.db_kwargs)
+        options = driver_options(self.mode, self.db_kwargs)
         uri = options.pop("uri")
         return dbapi.connect(
             uri,
