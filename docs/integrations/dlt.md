@@ -1,4 +1,4 @@
-> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for current source installation, migration and test commands.
+> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for installation, migration and test commands.
 
 # Redis integration guide for dlt
 
@@ -8,11 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
-This guide describes current repository capabilities. A newly added helper or
-extra may require a build containing its implementation. If a released wheel
-lacks it, build the native driver from this checkout and install the relevant
-extra from `./python`; set `REDIS_ADBC_LIBRARY` to the built library. Do not infer
-that an older published wheel contains every helper documented here.
+Install the integration from PyPI; its version matches the driver release it
+requires, so pip also installs that `adbc-driver-redis` wheel:
+
+```sh
+python -m pip install --only-binary adbc-driver-redis 'redis-adbc-integrations[dlt]'
+```
+
+This guide describes the current repository. A helper added after the latest
+release is available only from a source install of this checkout
+(`./python`); do not assume an older release contains every helper documented
+here.
 
 ## dlt
 

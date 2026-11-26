@@ -1,4 +1,4 @@
-> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for current source installation, migration and test commands.
+> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for installation, migration and test commands.
 
 # Redis integration guide for Prefect
 
@@ -8,11 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
-This guide describes current repository capabilities. A newly added helper or
-extra may require a build containing its implementation. If a released wheel
-lacks it, build the native driver from this checkout and install the relevant
-extra from `./python`; set `REDIS_ADBC_LIBRARY` to the built library. Do not infer
-that an older published wheel contains every helper documented here.
+Install the integration from PyPI; its version matches the driver release it
+requires, so pip also installs that `adbc-driver-redis` wheel:
+
+```sh
+python -m pip install --only-binary adbc-driver-redis 'redis-adbc-integrations[prefect]'
+```
+
+This guide describes the current repository. A helper added after the latest
+release is available only from a source install of this checkout
+(`./python`); do not assume an older release contains every helper documented
+here.
 
 ## Prefect custom Python tasks
 
@@ -51,9 +57,8 @@ need the driver wheel and Redis connectivity installed separately.
 Run against a disposable Redis with Search:
 
 ```sh
-python -m pip install ./driver/python -e './python[prefect]' pytest
+python -m pip install --only-binary adbc-driver-redis adbc-driver-redis -e './python[prefect]' pytest
 REDIS_URI=redis://localhost:6379/0 \
-REDIS_ADBC_LIBRARY="$PWD/driver/go/build/libadbc_driver_redis.dylib" \
 PREFECT_SERVER_ANALYTICS_ENABLED=false \
 python -m pytest -q python/tests/test_prefect.py
 ```

@@ -16,9 +16,8 @@ library (Linux amd64/arm64 with glibc 2.28+, macOS arm64):
 python -m pip install --only-binary adbc-driver-redis 'redis-adbc-integrations[dask]'
 ```
 
-Until the first release reaches PyPI, or to use unreleased integration code,
-install the driver wheel with an extra from this checkout. CI tests this
-combination against the latest driver release:
+To use unreleased integration code, install the driver wheel with an extra from
+this checkout. CI tests this combination against the latest driver release:
 
 ```sh
 git clone https://github.com/Redislabs-Solution-Architects/redis-adbc-integrations.git

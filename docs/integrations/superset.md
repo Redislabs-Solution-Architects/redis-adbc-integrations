@@ -1,4 +1,4 @@
-> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for current source installation, migration and test commands.
+> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for installation, migration and test commands.
 
 # Apache Superset integration status
 
