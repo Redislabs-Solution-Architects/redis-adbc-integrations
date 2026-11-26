@@ -46,6 +46,13 @@ else
   [[ -f "$REDIS_TLS_CA_FILE" ]] || exit 92
   [[ "$REQUIRE_RAY_TLS" == 1 ]] || exit 93
   [[ "$SSL_CERT_FILE" == unchanged ]] || exit 94
+  if [[ "${REDIS_ADBC_INSTALLED_DRIVER:-}" == 1 ]]; then
+    [[ -z "${REDIS_ADBC_LIBRARY+set}" ]] || exit 95
+    [[ "$PYTHONPATH" != *"/driver/python"* ]] || exit 96
+  else
+    [[ "$REDIS_ADBC_LIBRARY" == */driver/go/build/libadbc_driver_redis.* ]] || exit 97
+    [[ "$PYTHONPATH" == *"/driver/python"* ]] || exit 98
+  fi
   echo pytest >> "$EVENTS"
   exit "${PYTEST_EXIT:-0}"
 fi
@@ -71,6 +78,12 @@ fi
         result, events = self.run_fixture()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(events, ["make", "make", "pytest", "cleanup"])
+
+    def test_installed_driver_skips_source_build_and_override(self):
+        result, events = self.run_fixture(REDIS_ADBC_INSTALLED_DRIVER="1",
+                                          REDIS_ADBC_LIBRARY="/stale/source/build.so")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(events, ["make", "pytest", "cleanup"])
 
     def test_pytest_failure_still_cleans_and_preserves_status(self):
         result, events = self.run_fixture(PYTEST_EXIT="3")

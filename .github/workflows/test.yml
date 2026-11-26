@@ -4,14 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly runs test the latest upstream driver main; pushes, pull requests
-  # and releases test the pinned driver/ submodule.
+  # Pushes, pull requests and releases test the latest adbc-driver-redis
+  # release from PyPI, as users install it. Nightly runs build and test the
+  # latest upstream driver main.
   schedule:
     - cron: '27 9 * * *'
   workflow_dispatch:
     inputs:
       driver_ref:
-        description: Upstream driver branch or tag to test instead of the pin (empty = pinned driver/)
+        description: Upstream driver branch or tag to build from source (empty = latest PyPI release)
         required: false
         default: ''
         type: string
@@ -71,19 +72,36 @@ jobs:
       PREFECT_HOME: /tmp/redis-prefect-home
     steps:
       - uses: actions/checkout@v7
-      - name: Initialize pinned driver
+      - name: Initialize driver fixtures
         run: git submodule update --init --depth 1 driver
-      - name: Select driver revision
+      - name: Select driver under test
+        id: driver
         env:
-          DRIVER_REF: ${{ github.event_name == 'schedule' && 'main' || inputs.driver_ref }}
+          DRIVER_REF: ${{ inputs.driver_ref || (github.event_name == 'schedule' && 'main') || '' }}
         run: |
           if [ -n "$DRIVER_REF" ]; then
             [[ "$DRIVER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || { echo "invalid driver_ref: $DRIVER_REF" >&2; exit 2; }
-            git -C driver fetch --depth 1 origin "$DRIVER_REF"
-            git -C driver checkout --detach FETCH_HEAD
+            mode=source fixture_ref=$DRIVER_REF
+          else
+            # PyPI publication is the last step of a driver release, so its
+            # latest version is the latest completed release users install.
+            version=$(curl -fsSL --retry 3 https://pypi.org/pypi/adbc-driver-redis/json |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+            [[ "$version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(\.post[0-9]+)?$ ]] || { echo "unexpected PyPI version: $version" >&2; exit 2; }
+            mode=wheel fixture_ref=v${BASH_REMATCH[1]}
+            echo "version=$version" >> "$GITHUB_OUTPUT"
           fi
-          echo "Driver under test: $(git -C driver rev-parse HEAD) (${DRIVER_REF:-pinned $(git rev-parse HEAD:driver)})" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Fixtures (redis-up, software-setup.sh) come from the same driver revision.
+          git -C driver fetch --depth 1 origin "$fixture_ref"
+          git -C driver checkout --detach FETCH_HEAD
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          if [ "$mode" = wheel ]; then
+            echo "Driver under test: adbc-driver-redis $version wheel from PyPI; fixtures from $fixture_ref ($(git -C driver rev-parse HEAD))"
+          else
+            echo "Driver under test: source build of $fixture_ref ($(git -C driver rev-parse HEAD))"
+          fi | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-go@v7
+        if: steps.driver.outputs.mode == 'source'
         with:
           go-version-file: driver/go/go.mod
           cache-dependency-path: driver/go/go.sum
@@ -91,18 +109,30 @@ jobs:
       - name: Install isolated framework environment
         env:
           SUITE: ${{ matrix.suite }}
+          MODE: ${{ steps.driver.outputs.mode }}
+          DRIVER_VERSION: ${{ steps.driver.outputs.version }}
         run: |
           uv venv --python 3.14 .venv
-          uv pip install --python .venv/bin/python ./driver/python "./python[$SUITE-tests]"
+          if [ "$MODE" = wheel ]; then
+            # The driver publishes binary wheels only; never fall back to a source build.
+            uv pip install --python .venv/bin/python --only-binary adbc-driver-redis \
+              "adbc-driver-redis[dbapi]==$DRIVER_VERSION" "./python[$SUITE-tests]"
+            .venv/bin/python -c 'import importlib.metadata as m; from adbc_driver_redis import _driver_path; print("Installed adbc-driver-redis", m.version("adbc-driver-redis"), "with bundled", _driver_path())'
+          else
+            uv pip install --python .venv/bin/python ./driver/python "./python[$SUITE-tests]"
+          fi
       - name: Build fixture driver
+        if: steps.driver.outputs.mode == 'source'
         run: make -C driver/go build
       - name: Start verified Software fixture
         run: make -C driver/go redis-up
       - name: Exercise framework contracts
         env:
           SUITE: ${{ matrix.suite }}
-          REDIS_ADBC_LIBRARY: ${{ github.workspace }}/driver/go/build/libadbc_driver_redis.so
+          # Source builds load the fixture library; wheels use their bundled one.
+          REDIS_ADBC_LIBRARY: ${{ steps.driver.outputs.mode == 'source' && format('{0}/driver/go/build/libadbc_driver_redis.so', github.workspace) || '' }}
         run: |
+          [ -n "$REDIS_ADBC_LIBRARY" ] || unset REDIS_ADBC_LIBRARY
           case "$SUITE" in
             analytics) tests=(dagster dagster_adbc dask dask_write prefect dlt) ;;
             airflow) tests=(airflow airflow_hook) ;;
@@ -117,6 +147,7 @@ jobs:
         env:
           PYTHON: ${{ github.workspace }}/.venv/bin/python
           CANDIDATE_JUNIT_XML: ${{ github.workspace }}/ray-tls-results.xml
+          REDIS_ADBC_INSTALLED_DRIVER: ${{ steps.driver.outputs.mode == 'wheel' && '1' || '' }}
         run: python/scripts/run-ray-tls-candidates.sh
       - name: Upload framework results
         if: always()

@@ -8,12 +8,21 @@ The driver, DBAPI, Arrow, native reads and SQLAlchemy dialect remain upstream.
 
 No release of this extracted distribution has been published yet. Use an
 isolated Python 3.14 environment. Each worker needs the driver and its framework
-integration installed. The pinned driver submodule (driver release `v0.0.31`)
-provides the reproducible source build that CI tests:
+integration installed. Install the driver wheel from PyPI, which bundles its
+native library (Linux amd64/arm64 with glibc 2.28+, macOS arm64), with an
+integration extra from this checkout. CI tests this combination against the
+latest driver release:
 
 ```sh
 git clone https://github.com/Redislabs-Solution-Architects/redis-adbc-integrations.git
 cd redis-adbc-integrations
+python -m pip install --only-binary adbc-driver-redis adbc-driver-redis './python[dask]'
+```
+
+To use unreleased driver code instead, build it from the `driver` submodule
+(fetch and check out another driver branch or tag first if needed):
+
+```sh
 git submodule update --init --depth 1 driver
 make -C driver/go build
 python -m pip install ./driver/python './python[dask]'
@@ -60,14 +69,18 @@ core driver's `redis+adbc` / `rediss+adbc` SQLAlchemy dialect.
 - [Superset](docs/integrations/superset.md)
 
 Run tests only against a disposable Redis Software fixture with active, verified
-4x QPF. From the repository root, after installing the desired test extra:
+4x QPF. From the repository root, install the desired test extra and start the
+fixture from the `driver` submodule:
 
 ```sh
-python -m pip install ./driver/python './python[analytics-tests]'
-make -C driver/go redis-up build
-export REDIS_ADBC_LIBRARY="$PWD/driver/go/build/libadbc_driver_redis.so"
+git submodule update --init --depth 1 driver
+python -m pip install --only-binary adbc-driver-redis adbc-driver-redis './python[analytics-tests]'
+make -C driver/go redis-up
 bash driver/go/software-setup.sh --exec python -m pytest -q "$PWD/python/tests/test_dask.py" "$PWD/python/tests/test_dask_write.py"
 ```
+
+For a source-built driver, install `./driver/python` instead of the wheel, run
+`make -C driver/go build` and set `REDIS_ADBC_LIBRARY` as shown above.
 
 CI owns isolated Software fixtures for analytics on Linux amd64/arm64 and for
 Airflow and Ray on Linux amd64, preserving the extracted architecture coverage. Ray also
@@ -78,15 +91,18 @@ an unavailable Superset dependency set is a blocker, not a passing check.
 
 Extracted from `redis/redis-adbc-driver` at
 `cacae16c637bd5459a43f9e794e8c80f7fafa08f`, retaining Apache-2.0 notices. The
-`driver` gitlink pins the source used by CI and local fixtures; it currently
-points at driver release `v0.0.31`, matching the `adbc-driver-redis>=0.0.31`
-requirement. Update it explicitly to move push, pull request and release runs
-to a newer driver. The nightly scheduled run instead builds and tests the latest
-upstream driver `main`, so a driver change that breaks an integration shows up
-before the next pin update; a manual run can test another driver branch or tag
-through the `driver_ref` input. CI builds the driver from source and does not
-test the published PyPI wheel. No native driver source is vendored into
-this Python distribution, and its namespace does not overlap the core package.
+`driver` submodule supplies the Redis Software fixtures and optional source
+builds; it is not what CI tests by default. Push, pull request and release runs
+install the latest `adbc-driver-redis` release from PyPI, as users do, and check
+out that release's tag for fixtures. The nightly scheduled run instead builds
+and tests the latest upstream driver `main`, so a driver change that breaks an
+integration shows up before it is released; a manual run can build another
+driver branch or tag through the `driver_ref` input. A new driver release can
+therefore fail CI on an unchanged branch: that is the breakage users would see.
+Once newer releases exist, CI no longer tests the `adbc-driver-redis>=0.0.31`
+floor itself; raise it when an integration needs newer driver behavior. No
+native driver source is vendored into this Python distribution, and its
+namespace does not overlap the core package.
 
 A published GitHub release runs all supported integration jobs before attaching
 the pure Python wheel, source distribution and SHA-256 files to that release.
