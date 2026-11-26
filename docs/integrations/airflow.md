@@ -1,4 +1,4 @@
-> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for current source installation, migration and test commands.
+> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for installation, migration and test commands.
 
 # Redis integration guide for Apache Airflow
 
@@ -8,11 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
-This guide describes current repository capabilities. A newly added helper or
-extra may require a build containing its implementation. If a released wheel
-lacks it, build the native driver from this checkout and install the relevant
-extra from `./python`; set `REDIS_ADBC_LIBRARY` to the built library. Do not infer
-that an older published wheel contains every helper documented here.
+Install the integration from PyPI; its version matches the driver release it
+requires, so pip also installs that `adbc-driver-redis` wheel:
+
+```sh
+python -m pip install --only-binary adbc-driver-redis 'redis-adbc-integrations[airflow]'
+```
+
+This guide describes the current repository. A helper added after the latest
+release is available only from a source install of this checkout
+(`./python`); do not assume an older release contains every helper documented
+here.
 
 ## Apache Airflow
 
@@ -36,10 +42,10 @@ Reproduce from the repository root using a separate **Python 3.14** environment
 ```sh
 python3.14 -m venv /tmp/redis-airflow-tests
 source /tmp/redis-airflow-tests/bin/activate
-python -m pip install ./driver/python './python[airflow-tests]'
-make -C driver/go redis-up build
+python -m pip install --only-binary adbc-driver-redis adbc-driver-redis './python[airflow-tests]'
+git submodule update --init --depth 1 driver  # Redis Software fixture
+make -C driver/go redis-up
 source driver/go/build/test.env
-export REDIS_ADBC_LIBRARY="$PWD/driver/go/build/libadbc_driver_redis.so" # .dylib on macOS
 RUN_AIRFLOW_TESTS=1 \
   python -m pytest -q python/tests/test_airflow.py
 ```
@@ -131,7 +137,7 @@ The earlier focused run used Airflow 3.3.2, Arrow provider 0.1.1 and common-sql
 2.1.1. Run the current pinned integration in a separate Python 3.14 environment:
 
 ```sh
-python -m pip install ./driver/python './python[airflow-tests]'
+python -m pip install --only-binary adbc-driver-redis adbc-driver-redis './python[airflow-tests]'
 make -C driver/go redis-up
 source driver/go/build/test.env
 python -m pytest -q python/tests/test_airflow_hook.py

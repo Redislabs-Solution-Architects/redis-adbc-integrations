@@ -1,4 +1,4 @@
-> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for current source installation, migration and test commands.
+> This guide is maintained in redis-adbc-integrations. See [the repository README](../../README.md) for installation, migration and test commands.
 
 # Redis integration guide for Ray Data
 
@@ -8,11 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
-This guide describes current repository capabilities. A newly added helper or
-extra may require a build containing its implementation. If a released wheel
-lacks it, build the native driver from this checkout and install the relevant
-extra from `./python`; set `REDIS_ADBC_LIBRARY` to the built library. Do not infer
-that an older published wheel contains every helper documented here.
+Install the integration from PyPI; its version matches the driver release it
+requires, so pip also installs that `adbc-driver-redis` wheel:
+
+```sh
+python -m pip install --only-binary adbc-driver-redis 'redis-adbc-integrations[ray]'
+```
+
+This guide describes the current repository. A helper added after the latest
+release is available only from a source install of this checkout
+(`./python`); do not assume an older release contains every helper documented
+here.
 
 ## Ray Data
 
@@ -21,11 +27,11 @@ that an older published wheel contains every helper documented here.
 Complete the [shared example setup](https://github.com/redis/redis-adbc-driver/blob/main/docs/integrations/example-setup.md) for the sample-data helper
 before running the first block. It creates and removes a unique input table.
 
-The source-tree `ray` extra pins Ray 2.60.0. Install this build on the caller
-and every worker (Python 3.14+), including its matching native library:
+The `ray` extra pins Ray 2.60.0. Install it on the caller and every worker
+(Python 3.14+); the driver wheel carries the matching native library:
 
 ```sh
-python -m pip install ./driver/python './python[ray]'
+python -m pip install --only-binary adbc-driver-redis 'redis-adbc-integrations[ray]'
 ```
 
 ```python
