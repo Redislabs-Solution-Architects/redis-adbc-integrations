@@ -1,0 +1,150 @@
+name: Driver release
+
+# Each completed driver release gets a matching redis-adbc-integrations
+# release with the same version, requiring exactly that driver release. This
+# runs every integration suite against the driver's PyPI wheel and, only if all
+# pass, publishes the GitHub release and then the same files to PyPI.
+on:
+  schedule:
+    - cron: '47 11 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrations-driver-release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      driver_version: ${{ steps.release.outputs.driver_version }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      release_exists: ${{ steps.release.outputs.release_exists }}
+    steps:
+      - name: Find the latest completed driver release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # PyPI publication is the last step of a driver release, so its latest
+          # version is the latest release that passed the driver's release gates.
+          driver_version=$(curl -fsSL --retry 3 https://pypi.org/pypi/adbc-driver-redis/json |
+            python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          [[ "$driver_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(\.post[0-9]+)?$ ]] || { echo "unexpected PyPI version: $driver_version" >&2; exit 2; }
+          version=${BASH_REMATCH[1]} tag=v${BASH_REMATCH[1]}
+          # PyPI is also this workflow's last step: once it has the version, the release is complete.
+          status=$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 "https://pypi.org/pypi/redis-adbc-integrations/$version/json")
+          case "$status" in
+            200) echo "redis-adbc-integrations $version is already on PyPI." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0 ;;
+            404) ;;
+            *) echo "unexpected PyPI status $status" >&2; exit 1 ;;
+          esac
+          if existing=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .html_url 2>&1); then
+            release_exists=true
+          elif [[ "$existing" == *"HTTP 404"* ]]; then
+            release_exists=false
+          else
+            echo "$existing" >&2
+            exit 1
+          fi
+          {
+            echo "driver_version=$driver_version"; echo "version=$version"; echo "tag=$tag"
+            echo "release_exists=$release_exists"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$release_exists" = true ]; then
+            echo "GitHub release $tag exists; publishing its files to PyPI." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Testing and releasing $tag with adbc-driver-redis $driver_version." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  test:
+    needs: resolve
+    if: needs.resolve.outputs.version != '' && needs.resolve.outputs.release_exists != 'true'
+    # The called workflow's release-event upload step needs contents: write;
+    # its test jobs stay read-only through that workflow's top-level permissions.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/test.yml
+    with:
+      driver_version: ${{ needs.resolve.outputs.driver_version }}
+      release_version: ${{ needs.resolve.outputs.tag }}
+
+  github-release:
+    needs: [resolve, test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      DRIVER_VERSION: ${{ needs.resolve.outputs.driver_version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-distribution
+          path: dist
+      - name: Verify the tested distribution
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          python3 scripts/check_release.py dist "$VERSION"
+      - name: Publish the matching GitHub release
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          notes="Framework integrations matching [Redis ADBC driver $TAG](https://github.com/redis/redis-adbc-driver/releases/tag/$TAG). Requires \`adbc-driver-redis[dbapi]==$VERSION.*\`.
+
+          Every integration suite passed against the \`adbc-driver-redis\` $DRIVER_VERSION wheel from PyPI in [this run]($RUN_URL). The same files are published to [PyPI](https://pypi.org/project/redis-adbc-integrations/$VERSION/)."
+          gh release create "$TAG" dist/*.whl dist/*.tar.gz dist/SHA256SUMS --target "$GITHUB_SHA" \
+            --title "$TAG: matches Redis ADBC driver $TAG" --notes "$notes"
+
+  pypi:
+    needs: [resolve, github-release]
+    # Runs after a new GitHub release, or to finish one whose PyPI upload is missing.
+    if: >-
+      always() && needs.resolve.outputs.version != '' &&
+      (needs.github-release.result == 'success' || needs.resolve.outputs.release_exists == 'true')
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/redis-adbc-integrations/
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Download the GitHub release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release download "$TAG" --dir release --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+          (cd release && sha256sum -c SHA256SUMS)
+          mkdir dist && cp release/*.whl release/*.tar.gz dist/
+      - name: Check distribution metadata
+        run: |
+          python scripts/check_release.py dist "$VERSION"
+          python -m pip install twine
+          python -m twine check dist/*
+      - name: Publish using PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
+        with:
+          packages-dir: dist/
+          skip-existing: true

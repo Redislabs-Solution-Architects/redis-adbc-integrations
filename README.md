@@ -4,14 +4,21 @@ Airflow, Dagster, Dask, Ray, Prefect, dlt and Superset integrations for
 [the Redis ADBC driver](https://github.com/redis/redis-adbc-driver).
 The driver, DBAPI, Arrow, native reads and SQLAlchemy dialect remain upstream.
 
-## Install from source
+## Install
 
-No release of this extracted distribution has been published yet. Use an
-isolated Python 3.14 environment. Each worker needs the driver and its framework
-integration installed. Install the driver wheel from PyPI, which bundles its
-native library (Linux amd64/arm64 with glibc 2.28+, macOS arm64), with an
-integration extra from this checkout. CI tests this combination against the
-latest driver release:
+Use an isolated Python 3.14 environment. Each worker needs the driver and its
+framework integration installed. Releases share the driver's version:
+`redis-adbc-integrations` X.Y.Z was tested with, and requires, driver release
+X.Y.Z (`adbc-driver-redis[dbapi]==X.Y.Z.*`). The driver wheel bundles its native
+library (Linux amd64/arm64 with glibc 2.28+, macOS arm64):
+
+```sh
+python -m pip install --only-binary adbc-driver-redis 'redis-adbc-integrations[dask]'
+```
+
+Until the first release reaches PyPI, or to use unreleased integration code,
+install the driver wheel with an extra from this checkout. CI tests this
+combination against the latest driver release:
 
 ```sh
 git clone https://github.com/Redislabs-Solution-Architects/redis-adbc-integrations.git
@@ -104,9 +111,17 @@ floor itself; raise it when an integration needs newer driver behavior. No
 native driver source is vendored into this Python distribution, and its
 namespace does not overlap the core package.
 
-A published GitHub release runs all supported integration jobs before attaching
-the pure Python wheel, source distribution and SHA-256 files to that release.
-PyPI publication is not configured; install from source until an artifact is
-available. Framework releases are independent of the driver's release workflow.
+Each driver release gets a matching release here. The daily `Driver release`
+workflow takes the latest `adbc-driver-redis` version on PyPI and runs every
+integration suite against that wheel. Only if all of them pass does it build
+`redis-adbc-integrations` with the same version, requiring
+`adbc-driver-redis[dbapi]==X.Y.Z.*`. It then publishes the wheel, source
+distribution and `SHA256SUMS` as GitHub release `vX.Y.Z`, and finally uploads
+those same files to [PyPI](https://pypi.org/project/redis-adbc-integrations/)
+through Trusted Publishing (the `pypi` environment). A rerun finishes a release
+whose PyPI upload is missing and skips versions already on PyPI. Integration-only
+fixes ship with the next driver release. A GitHub release published by hand
+runs the integration jobs and attaches the same kinds of files, but is not
+uploaded to PyPI.
 
 Upstream extraction and migration review: [redis-adbc-driver #489](https://github.com/redis/redis-adbc-driver/pull/489).
