@@ -32,16 +32,24 @@ container="$("${compose[@]}" ps --quiet redis-software)"
 "$python_bin" "$driver_root/scripts/software_partition_tls.py" "$fixture_root/tls" \
   --container "$container" --api-port "$SOFTWARE_API_PORT" \
   --db-port "$SOFTWARE_DB_PORT" --shards 1
-make -C "$driver_root/go" build
-case "$(uname -s)" in
-  Darwin) driver_extension=dylib ;;
-  Linux) driver_extension=so ;;
-  *) echo "unsupported driver build platform" >&2; exit 2 ;;
-esac
+driver_pythonpath=""
+if [[ "${REDIS_ADBC_INSTALLED_DRIVER:-}" == 1 ]]; then
+  # Test the adbc-driver-redis already installed for $python_bin (for example a
+  # PyPI wheel with its bundled native library); driver_root supplies fixtures.
+  unset REDIS_ADBC_LIBRARY
+else
+  make -C "$driver_root/go" build
+  case "$(uname -s)" in
+    Darwin) driver_extension=dylib ;;
+    Linux) driver_extension=so ;;
+    *) echo "unsupported driver build platform" >&2; exit 2 ;;
+  esac
+  export REDIS_ADBC_LIBRARY="$driver_root/go/build/libadbc_driver_redis.${driver_extension}"
+  driver_pythonpath=":$driver_root/python"
+fi
 export REDIS_URI="$(cat "$fixture_root/tls/admin.uri")"
 export REDIS_TLS_CA_FILE="$fixture_root/tls/ca.crt"
-export REDIS_ADBC_LIBRARY="$driver_root/go/build/libadbc_driver_redis.${driver_extension}"
-export PYTHONPATH="$repo_root/python:$driver_root/python${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$repo_root/python${driver_pythonpath}${PYTHONPATH:+:$PYTHONPATH}"
 export REDIS_RETAINED_CONTROL_PERSISTENCE=guaranteed
 export RUN_RAY_TESTS=1 REQUIRE_RAY_TLS=1 RAY_USAGE_STATS_ENABLED=0
 # Do not set SSL_CERT_FILE, REQUESTS_CA_BUNDLE or package-manager trust options.
