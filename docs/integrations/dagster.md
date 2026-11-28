@@ -8,6 +8,18 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
+**Default mode: live.** Dagster is in the orchestration group, so
+`RedisADBCIOManager` defaults to the driver's live mode; only read-heavy BI and
+visualization integrations default to managed tables. Live mode sets
+`adbc.redis.live_tables=true` and `adbc.redis.schema_ownership=live`: each asset
+is a live table in a live schema, and each row is an application-owned HASH that
+Redis clients can read and write directly. Live reads have no statement
+snapshot, writes apply per row, and a row whose values are all NULL is refused.
+Set `mode="managed"` on the IO manager for managed tables with statement
+snapshots, and on Redis Flex, which does not support live tables. The community
+`ADBCResource` below is unaffected: it uses whatever `db_kwargs` you give it. See
+[driver modes](../../README.md#driver-modes).
+
 Install the integration from PyPI; its version matches the driver release it
 requires, so pip also installs that `adbc-driver-redis` wheel:
 
@@ -84,8 +96,9 @@ The [smoke example](https://github.com/Redislabs-Solution-Architects/redis-adbc-
 loads it from Redis into the dependent `revenue` asset, and checks the persisted
 result with SQL: three orders totaling 42. Each invocation uses a unique schema
 and drops it on exit. The integration suite also checks Arrow/pandas/polars
-round trips, column projection, partition retries, and failed-stream preservation;
-it creates and removes the fixed `it_python_dagster` schema, so run it serially.
+round trips, column projection, partition retries, and failed-stream preservation
+in both modes, plus live HASH replacement on rematerialization; it creates and
+removes the fixed `it_python_dagster` schema, so run it serially.
 
 Outputs may be `pyarrow.Table`, `RecordBatchReader`, pandas or polars DataFrames.
 Inputs default to Arrow tables; annotate them with pandas/polars DataFrame or
@@ -94,13 +107,14 @@ Reader outputs ingest in batches; reader inputs currently materialize the result
 before returning an in-memory reader.
 
 Asset names preserve component boundaries and case. With no `schema_name`, the
-prefix path determines the schema (`public` without a prefix), and the final
-component determines the table. With `schema_name`, the entire asset path
+prefix path determines the schema (without a prefix, `redis_live` in live mode
+and `public` in managed mode), and the final component determines the table. With `schema_name`, the entire asset path
 determines the table inside that schema (the schema setting is lowercased).
 A single lowercase ASCII identifier matching `[a-z_][a-z0-9_]*` stays readable,
 unless it begins with the reserved `dagster__` marker. Other paths are encoded
 as `dagster__` followed by each component's UTF-8 hex, separated by underscores.
-An explicit `public` prefix is also encoded to distinguish it from no prefix.
+An explicit `public` prefix is also encoded to distinguish it from no prefix,
+as is an explicit `redis_live` prefix in live mode.
 For example, `["a_b", "c", "orders"]` maps to
 `dagster__615f62_63.orders`, while `["a", "b_c", "orders"]` maps to
 `dagster__61_625f63.orders`. Simple `orders` and `sales.orders` stay unchanged.
@@ -113,14 +127,23 @@ or rematerialize affected assets before downstream reads. The manager does not
 read, drop, or migrate ambiguous legacy tables automatically. Previously
 overwritten asset data must be recovered from its source or a backup.
 
-Configure `db_kwargs` for native options and
-`index_columns` for ingestion indexing (`*` by default). Output metadata includes
-row count, table name and Arrow column schema.
+Configure `mode` (`live` by default, or `managed`), `db_kwargs` for native
+options and `index_columns` for ingestion indexing (`*` by default; applied when
+a live table is created). Live tables store rows under
+`<key_prefix><schema>:<table>:<id>:`, with `key_prefix` defaulting to `dagster:`.
+Output metadata includes row count, table name, mode, Arrow column schema and,
+in live mode, the table's `key_prefix`. In live mode a prefix that names an
+existing managed schema fails instead of writing a managed table.
 
 Unpartitioned writes load a unique staging table before dropping the old table
 and renaming the stage. A failed ingest preserves the old version; a failure
 between DROP and RENAME can leave it absent. Readers can also observe this brief
-window. Static/dynamic string and daily/time-window partitions require asset
+window. In live mode, each materialization stages under a fresh key prefix; the
+manager then deletes the old table's HASHes, drops (unregisters) it and renames
+the stage, so the asset's key prefix changes on every materialization. A failure
+after the old rows are deleted can leave the asset empty or partial; the error
+names the staging table that still holds the new rows. A failed stage write
+deletes the stage's HASHes and unregisters it. Static/dynamic string and daily/time-window partitions require asset
 metadata `{"partition_expr": "column_name"}`. The manager uses bound partition
 values or a half-open time range, deletes those rows, then appends. A retry
 replaces that partition. A failed append may leave it partially written; values

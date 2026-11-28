@@ -6,8 +6,8 @@ import uuid
 import pyarrow as pa
 from dagster import asset, materialize
 
-from adbc_driver_redis import dbapi
 from redis_adbc_integrations.dagster import RedisADBCIOManager
+from redis_adbc_integrations.modes import connect
 
 
 @asset(io_manager_key="redis")
@@ -26,12 +26,13 @@ def revenue(orders: pa.Table) -> pa.Table:
 def main():
     uri = os.environ["REDIS_URI"]
     schema = f"dagster_smoke_{uuid.uuid4().hex}"
+    # Live mode (the default) stores both assets as HASHes in a live schema.
     manager = RedisADBCIOManager(uri=uri, schema_name=schema)
     try:
         result = materialize([orders, revenue], resources={"redis": manager})
         if not result.success:
             raise RuntimeError("Dagster materialization failed")
-        with dbapi.connect(uri) as conn, conn.cursor() as cur:
+        with connect(uri, "dagster") as conn, conn.cursor() as cur:
             cur.execute(f'SELECT order_count, total FROM "{schema}".revenue')
             rows = cur.fetchall()
         if rows != [(3, 42)]:
@@ -39,8 +40,15 @@ def main():
         print("REDIS_ADBC_READ_WRITE_OK")
         print("Dagster → Redis → Dagster → Redis: 3 orders, total 42; SQL verification passed.")
     finally:
-        # The generated schema belongs exclusively to this invocation.
-        with dbapi.connect(uri) as conn, conn.cursor() as cur:
+        # The generated schema belongs exclusively to this invocation. DROP keeps
+        # live HASHes, so delete each table's rows first.
+        with connect(uri, "dagster") as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+                (schema,),
+            )
+            for (table,) in cur.fetchall():
+                cur.execute(f'DELETE FROM "{schema}"."{table}"')
             cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 

@@ -8,6 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
+**Default mode: live.** dlt is in the data loading group, so it defaults to the
+driver's live mode; only read-heavy BI and visualization integrations default to
+managed tables. Live mode sets `adbc.redis.live_tables=true` and
+`adbc.redis.schema_ownership=live`: tables in `redis_live` and other live schemas
+store each row as an application-owned HASH that Redis clients can read and
+write directly. Live reads have no statement snapshot, writes apply per row,
+and a row whose values are all NULL is refused. `DROP TABLE` only unregisters a
+live table and keeps its HASHes, so delete the rows first. `redis_adbc(mode="managed")` loads managed tables instead. Use
+managed mode for statement snapshots, and on Redis Flex, which does not support
+live tables. See [driver modes](../../README.md#driver-modes).
+
 Install the integration from PyPI; its version matches the driver release it
 requires, so pip also installs that `adbc-driver-redis` wheel:
 
@@ -31,8 +42,8 @@ dlt 1.31.0. It sends normalized Parquet Arrow batches to the native driver's
 import os
 from uuid import uuid4
 import dlt
-from adbc_driver_redis import dbapi
 from redis_adbc_integrations.dlt import redis_adbc
+from redis_adbc_integrations.modes import connect
 from integration_guide_data import example_table, read_rows
 
 @dlt.resource(name="orders")
@@ -45,15 +56,21 @@ pipeline = dlt.pipeline(
     pipeline_name=schema,
     destination=redis_adbc(uri=os.environ["REDIS_URI"], schema_name=schema, batch_size=1000),
 )
-with dbapi.connect(os.environ["REDIS_URI"]) as conn, conn.cursor() as cur:
+with connect(os.environ["REDIS_URI"], "dlt") as conn, conn.cursor() as cur:
     try:
         with example_table() as name:
             info = pipeline.run(redis_source(name), write_disposition="append")
         info.raise_on_failed_jobs()
+        # The new live schema's rows are HASHes under dlt:<schema>:orders:.
         cur.execute(f'SELECT id, amount FROM "{schema}".orders ORDER BY id')
         assert cur.fetchall() == [(1, 2.5), (2, None), (3, 7.5)]
         print("REDIS_ADBC_READ_WRITE_OK")
     finally:
+        # DROP SCHEMA ... CASCADE keeps live HASHes; delete the rows first.
+        cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+                    (schema,))
+        for (table,) in cur.fetchall():
+            cur.execute(f'DELETE FROM "{schema}"."{table}"')
         cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 ```
 
@@ -70,8 +87,11 @@ uri = "rediss://user:password@host:port/0"
 
 In that case construct `redis_adbc(schema_name="analytics")` without `uri`.
 TLS verification follows the driver's `rediss://` behavior. `schema_name`
-defaults to `public` and is independent of dlt's `dataset_name`. The schema and
-missing tables are created automatically. dlt normalizes table/column names with
+defaults to `redis_live` in live mode (`public` in managed mode) and is
+independent of dlt's `dataset_name`. The schema and missing tables are created
+automatically; in live mode a new schema is a live schema and a new table stores
+its rows under `<key_prefix><schema>:<table>:` (`key_prefix` defaults to `dlt:`).
+`index_columns` applies when a live table is created. dlt normalizes table/column names with
 `snake_case`; its internal tables and columns are omitted. Configure `db_kwargs`
 for native database options and `index_columns` for ingestion indexing (`*` by
 default). Batches default to 1,000 rows, and load jobs run sequentially. Keep

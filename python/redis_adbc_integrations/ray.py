@@ -9,6 +9,8 @@ from ray.data.datasource import Datasource, ReadTask
 
 from adbc_driver_redis import dbapi
 
+from .modes import LIVE, driver_options, resolve_mode
+
 
 def _positive_int(name, value, maximum=None):
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -47,19 +49,27 @@ def _stream_partition(descriptor, *, uri, schema, db_kwargs, conn_kwargs):
 
 
 class RedisDatasource(Datasource):
-    """A planned live Redis read; also usable as a context manager.
+    """A planned Redis read; also usable as a context manager.
 
     Planning opens and closes a connection immediately. Rows are fetched only
-    by Ray workers. All descriptors retain one shared generation and replay it
+    by Ray workers. Call ``close()`` after all reads/retries finish to release
+    its partition group promptly, or use a context covering the complete Ray
+    computation.
+
+    ``mode`` defaults to ``"live"``: the query reads one live HASH table in
+    ``redis_live`` through hash-bucket partitions of its original keys. Only
+    row-local projections and filters are supported. Each worker scans the
+    current HASHes, so partitions share no point-in-time view and a retried
+    partition can return different rows. ``mode="managed"`` reads managed
+    tables instead: all descriptors retain one shared generation and replay it
     until their admission lifetime expires or the partition group is released.
     Construct a new datasource to observe later writes.
-    Call ``close()`` after all reads/retries finish to release its partition
-    group promptly, or use a context covering the complete Ray computation.
     """
 
     def __init__(
         self, uri, query, *, parameters=None, partition_count=8,
         batch_rows=65536, partition_scan_cap=0, db_kwargs=None, conn_kwargs=None,
+        mode=None,
     ):
         super().__init__()
         if not isinstance(query, str) or not query.strip():
@@ -71,17 +81,21 @@ class RedisDatasource(Datasource):
                 or not 0 <= partition_scan_cap <= 2147483648):
             raise ValueError("partition_scan_cap must be an integer in 0..2147483648")
         self._uri = uri
-        self._db_kwargs = dict(db_kwargs or {})
+        self.mode = resolve_mode("ray", mode, db_kwargs)
+        self._db_kwargs = driver_options(self.mode, db_kwargs)
         self._db_kwargs["adbc.redis.stream_batch_rows"] = str(batch_rows)
         self._conn_kwargs = dict(conn_kwargs or {})
         with dbapi.connect(
             uri, db_kwargs=self._db_kwargs, conn_kwargs=self._conn_kwargs
         ) as conn, conn.cursor() as cur:
-            cur.adbc_statement.set_options(**{
+            options = {
                 "adbc.redis.partition_count": str(partition_count),
                 "adbc.redis.partition_scan_cap": str(partition_scan_cap),
                 "adbc.redis.partition_result_mode": "live",
-            })
+            }
+            if self.mode == LIVE:
+                options["adbc.redis.partition_source_mode"] = "live_hash"
+            cur.adbc_statement.set_options(**options)
             partitions, self._schema = cur.adbc_execute_partitions(query, parameters)
             self._snapshot_id = cur.adbc_statement.get_option(
                 "adbc.redis.partition_snapshot_id"
@@ -141,6 +155,7 @@ class RedisDatasource(Datasource):
 def read_query(
     uri, query, *, parameters=None, partition_count=8, batch_rows=65536,
     concurrency=None, partition_scan_cap=0, db_kwargs=None, conn_kwargs=None,
+    mode=None,
 ):
     """Plan a supported SELECT and stream its partitions on Ray workers.
 
@@ -150,9 +165,12 @@ def read_query(
     ``concurrency`` caps simultaneous Ray read tasks. ``batch_rows`` bounds each
     driver Arrow batch, not total Ray object-store or pipeline memory.
 
-    Reads are unordered. Workers and retries share the planned snapshot while
-    descriptors remain valid (five minutes by default); expiry or explicit
-    release requires replanning. This does not provide CDC or exactly-once
+    ``mode`` defaults to ``"live"``, reading one ``redis_live`` table with
+    row-local projections/filters; partitions and retries then observe current
+    HASHes, with no shared snapshot. With ``mode="managed"``, workers and
+    retries share the planned snapshot while descriptors remain valid (five
+    minutes by default); expiry or explicit release requires replanning.
+    Reads are unordered. This does not provide CDC or exactly-once
     processing. Unsupported SQL fails during planning, without a
     materializing fallback. Worker-local TLS CA paths must exist on all nodes.
     Configuration may contain credentials; use a trusted Ray cluster.
@@ -164,6 +182,6 @@ def read_query(
     source = RedisDatasource(
         uri, query, parameters=parameters, partition_count=partition_count,
         batch_rows=batch_rows, partition_scan_cap=partition_scan_cap,
-        db_kwargs=db_kwargs, conn_kwargs=conn_kwargs,
+        db_kwargs=db_kwargs, conn_kwargs=conn_kwargs, mode=mode,
     )
     return ray.data.read_datasource(source, concurrency=concurrency)

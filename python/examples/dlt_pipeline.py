@@ -3,8 +3,8 @@
 import os
 
 import dlt
-from adbc_driver_redis import dbapi
 from redis_adbc_integrations.dlt import redis_adbc
+from redis_adbc_integrations.modes import connect
 
 
 def main():
@@ -19,7 +19,8 @@ def main():
         write_disposition="append",
     )
     info.raise_on_failed_jobs()
-    with dbapi.connect(uri) as conn, conn.cursor() as cur:
+    # Live mode (the default) keeps the rows as HASHes under dlt:dlt_example:orders:.
+    with connect(uri, "dlt") as conn, conn.cursor() as cur:
         cur.execute("SELECT id, amount FROM dlt_example.orders ORDER BY id")
         print(cur.fetch_arrow_table())
 

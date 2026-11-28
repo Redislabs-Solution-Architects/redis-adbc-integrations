@@ -8,6 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
+**Default mode: live.** Ray is in the distributed compute group, so it defaults to the
+driver's live mode; only read-heavy BI and visualization integrations default to
+managed tables. Live mode sets `adbc.redis.live_tables=true` and
+`adbc.redis.schema_ownership=live`: tables in `redis_live` and other live schemas
+store each row as an application-owned HASH that Redis clients can read and
+write directly. Live reads have no statement snapshot, writes apply per row,
+and a row whose values are all NULL is refused. `DROP TABLE` only unregisters a
+live table and keeps its HASHes, so delete the rows first. `read_query` and `RedisDatasource` plan live HASH partitions of one live table by default; pass `mode="managed"` to read managed tables instead. Use
+managed mode for statement snapshots, and on Redis Flex, which does not support
+live tables. See [driver modes](../../README.md#driver-modes).
+
 Install the integration from PyPI; its version matches the driver release it
 requires, so pip also installs that `adbc-driver-redis` wheel:
 
@@ -43,7 +54,7 @@ from redis_adbc_integrations.ray import RedisDatasource
 ray.init(num_cpus=2, include_dashboard=False)
 try:
     with example_table() as name, RedisDatasource(
-        os.environ["REDIS_URI"], f'SELECT id, label FROM "{name}" WHERE id >= ?',
+        os.environ["REDIS_URI"], f'SELECT id, label FROM redis_live."{name}" WHERE id >= ?',
         parameters=(1,), partition_count=2, batch_rows=65536,
     ) as source:
         ds = ray.data.read_datasource(source, concurrency=2)
@@ -67,7 +78,11 @@ Dataset schema; Ray may omit zero-row blocks from `to_arrow_refs()`.
 
 The [live partition SQL subset](https://github.com/redis/redis-adbc-driver/blob/main/docs/partitioned-reads.md#supported-queries) applies.
 Unsupported queries fail at planning; there is no automatic materializing
-fallback. The adapter explicitly selects live mode. Retained results, manual SQL
+fallback. The adapter selects the driver's `live` partition result mode (not to be
+confused with live tables). In live mode it also sets
+`adbc.redis.partition_source_mode=live_hash`: one live table, row-local
+projections and filters only, with each descriptor scanning one hash bucket of
+the original keys. Retained results, manual SQL
 splits, writes and Flight SQL are outside this adapter's scope. Existing Ray SQL
 read/write paths below are separate integrations.
 
@@ -75,11 +90,14 @@ read/write paths below are separate integrations.
 uneven. `concurrency` caps simultaneous Ray read tasks independently of split
 count. `batch_rows` controls native Arrow batch rows, not total pipeline memory;
 Ray can combine or split blocks and buffer data in its object store. Output is
-unordered. Reads and retries share the planned managed-table snapshot until its
-partition group expires (five minutes by default) or is explicitly released.
-Updates, TRUNCATE and DROP preserve that generation. Construct a new datasource
-to observe later writes. Expired or released descriptors require a new plan;
-there is no exactly-once processing guarantee.
+unordered. In live mode each partition reads the current HASHes: application
+writes, expiry and Search lag can interleave, partitions share no point-in-time
+view, and a retried partition can return different rows. With
+`mode="managed"`, reads and retries share the planned managed-table snapshot
+until its partition group expires (five minutes by default) or is explicitly
+released; updates, TRUNCATE and DROP preserve that generation. Construct a new
+datasource to observe later writes. Expired or released descriptors require a
+new plan; there is no exactly-once processing guarantee.
 
 `read_query` leaves the group available for lazy execution and retries until
 expiry. For explicit early release, use the datasource as a context manager and
@@ -122,22 +140,25 @@ import os
 from uuid import uuid4
 from functools import partial
 import ray
-from adbc_driver_redis import dbapi
+from redis_adbc_integrations.modes import connect as redis_connect
 
 ray.init(num_cpus=2, include_dashboard=False)
-connect = partial(dbapi.connect, os.environ["REDIS_URI"])
+# Ray's default live mode; the table's rows are HASHes under redis_live:<table>:.
+connect = partial(redis_connect, os.environ["REDIS_URI"], "ray")
 name = "guide_ray_sql_" + uuid4().hex
 try:
     ds = ray.data.read_sql("SELECT 1 AS one", connect, override_num_blocks=1)
     with connect() as conn, conn.cursor() as cur:
         try:
-            cur.execute(f'CREATE TABLE "{name}" (one bigint)')
-            ds.write_sql(f'INSERT INTO "{name}" (one) VALUES (?)', connect)
-            cur.execute(f'SELECT one FROM "{name}"')
+            cur.execute(f'CREATE TABLE redis_live."{name}" (one bigint)')
+            ds.write_sql(f'INSERT INTO redis_live."{name}" (one) VALUES (?)', connect)
+            cur.execute(f'SELECT one FROM redis_live."{name}"')
             assert cur.fetchall() == [(1,)]
             print("REDIS_ADBC_READ_WRITE_OK")
         finally:
-            cur.execute(f'DROP TABLE IF EXISTS "{name}"')
+            # DROP TABLE keeps live HASHes; delete the rows first.
+            cur.execute(f'DELETE FROM redis_live."{name}"')
+            cur.execute(f'DROP TABLE IF EXISTS redis_live."{name}"')
 finally:
     ray.shutdown()
 ```

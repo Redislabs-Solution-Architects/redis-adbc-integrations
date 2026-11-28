@@ -2,6 +2,11 @@
 
 # Apache Superset integration status
 
+Superset is a BI and visualization tool, a read-heavy group, so it keeps the
+driver's default **managed** mode: dashboards and SQL Lab read managed tables with
+a consistent statement snapshot. It does not enable live tables. See
+[driver modes](../../README.md#driver-modes).
+
 Superset 6.1 is unsupported under this project's Python 3.14-or-newer policy.
 It requires PyArrow below 19, which has no usable CPython 3.14 wheels on the
 checked Linux platform. The older Python environment, integration extra and

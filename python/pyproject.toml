@@ -9,7 +9,7 @@ description = "Optional framework adapters for the Redis ADBC driver"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
-dependencies = ["adbc-driver-redis[dbapi]>=0.0.31"]
+dependencies = ["adbc-driver-redis[dbapi]>=0.0.32"]
 
 [project.urls]
 Homepage = "https://github.com/Redislabs-Solution-Architects/redis-adbc-integrations"
@@ -23,7 +23,7 @@ ray = ["ray[data]==2.60.0", "pyarrow>=26.0.1"]
 prefect = ["prefect>=3.9.3,<4", "pyarrow>=26.0.1"]
 dlt = ["dlt[parquet]>=1.32.0,<2", "pyarrow>=26.0.1"]
 superset = ["apache-superset==6.1.0", "sqlalchemy>=2.1.9"]
-analytics-tests = ["pytest>=9.2.0", "polars>=2.1.0", "dagster-adbc>=0.0.2", "dagster>=1.13.30", "dask[dataframe,distributed]>=2026.8.0", "pandas>=3.1.1", "prefect>=3.9.3,<4", "dlt[parquet]>=1.32.0,<2"]
+analytics-tests = ["pytest>=9.2.0", "redis>=6", "polars>=2.1.0", "dagster-adbc>=0.0.2", "dagster>=1.13.30", "dask[dataframe,distributed]>=2026.8.0", "pandas>=3.1.1", "prefect>=3.9.3,<4", "dlt[parquet]>=1.32.0,<2"]
 airflow-tests = ["pytest>=9.2.0", "apache-airflow==3.4.0", "apache-airflow-providers-apache-arrow==0.2.0"]
 ray-tests = ["ray[data]==2.60.0", "pytest>=9.2.0", "redis>=6"]
 

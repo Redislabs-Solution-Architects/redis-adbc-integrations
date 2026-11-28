@@ -8,6 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
+**Default mode: live.** Prefect is in the orchestration group, so it defaults to the
+driver's live mode; only read-heavy BI and visualization integrations default to
+managed tables. Live mode sets `adbc.redis.live_tables=true` and
+`adbc.redis.schema_ownership=live`: tables in `redis_live` and other live schemas
+store each row as an application-owned HASH that Redis clients can read and
+write directly. Live reads have no statement snapshot, writes apply per row,
+and a row whose values are all NULL is refused. `DROP TABLE` only unregisters a
+live table and keeps its HASHes, so delete the rows first. Tasks open their own connections, so use `redis_adbc_integrations.modes.connect(uri, "prefect")` to get this default, or pass `mode="managed"`. Use
+managed mode for statement snapshots, and on Redis Flex, which does not support
+live tables. See [driver modes](../../README.md#driver-modes).
+
 Install the integration from PyPI; its version matches the driver release it
 requires, so pip also installs that `adbc-driver-redis` wheel:
 
@@ -27,14 +38,14 @@ task so concurrent tasks and retries each own their connection and cursor:
 
 ```python
 import os
-from adbc_driver_redis import dbapi
 from integration_guide_data import write_result
 from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
+from redis_adbc_integrations.modes import connect
 
 @task(cache_policy=NO_CACHE, persist_result=False)
 def query(uri):
-    with dbapi.connect(uri) as conn, conn.cursor() as cur:
+    with connect(uri, "prefect") as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 AS one")
         output = cur.fetch_arrow_table()
     return write_result(output)

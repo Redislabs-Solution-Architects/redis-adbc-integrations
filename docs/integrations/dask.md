@@ -8,6 +8,17 @@ for Python/native setup, supported wheel platforms, TLS and source builds.
 Tables must be created, ingested or adopted through the driver; arbitrary Redis
 keys do not automatically become SQL tables. Writes autocommit without rollback.
 
+**Default mode: live.** Dask is in the distributed compute group, so it defaults to the
+driver's live mode; only read-heavy BI and visualization integrations default to
+managed tables. Live mode sets `adbc.redis.live_tables=true` and
+`adbc.redis.schema_ownership=live`: tables in `redis_live` and other live schemas
+store each row as an application-owned HASH that Redis clients can read and
+write directly. Live reads have no statement snapshot, writes apply per row,
+and a row whose values are all NULL is refused. `DROP TABLE` only unregisters a
+live table and keeps its HASHes, so delete the rows first. Pass `mode="managed"` to `read_query` or `write_dataframe` for managed tables. Use
+managed mode for statement snapshots, and on Redis Flex, which does not support
+live tables. See [driver modes](../../README.md#driver-modes).
+
 Install the integration from PyPI; its version matches the driver release it
 requires, so pip also installs that `adbc-driver-redis` wheel:
 
@@ -38,10 +49,10 @@ to run one bound SELECT for each supplied parameter tuple:
 import pyarrow as pa
 from redis_adbc_integrations.dask import read_query
 
-# Existing table, with non-NULL ids in [0, 3000).
+# Existing live table, with non-NULL ids in [0, 3000).
 frame = read_query(
     "redis://localhost:6379/0",
-    "SELECT id, amount FROM orders WHERE id >= ? AND id < ?",
+    "SELECT id, amount FROM redis_live.orders WHERE id >= ? AND id < ?",
     [(0, 1000), (1000, 2000), (2000, 3000)],
     schema=pa.schema([("id", pa.int64()), ("amount", pa.float64())]),
     db_kwargs={"adbc.redis.query_workers": "1"},
@@ -116,14 +127,14 @@ The complete output is never gathered into the caller.
 from redis_adbc_integrations.dask import write_dataframe
 
 # output_frame is a Dask DataFrame with exactly these columns in this order.
-# Create the destination table separately with this Arrow schema first.
+# Create the destination live table first, for example with
+# CREATE TABLE redis_live.computed_orders (id BIGINT, amount DOUBLE).
 output_schema = pa.schema([("id", pa.int64()), ("amount", pa.float64())])
 pending = write_dataframe(
     output_frame,
     "rediss://user:password@redis.example:12000/0",
     "computed_orders",
     schema=output_schema,
-    db_schema_name="public",
     allow_duplicate_writes=True,
 )
 acknowledged_rows = pending.compute()
@@ -134,7 +145,10 @@ The helper only appends; it never creates, replaces, renames or drops a table.
 The caller owns destination setup, inspection after errors and cleanup, and must
 serialize other writers targeting that table. Within one write graph, appends
 run sequentially in partition order. Separate graphs are independent. Existing
-driver permissions and managed/unmanaged append rules still apply.
+driver permissions and live/managed/unmanaged append rules still apply. In live
+mode `db_schema_name` defaults to `redis_live`; each row becomes a HASH under the
+table's registered prefix, so every row needs a non-NULL value. Naming a managed
+schema's table appends to that managed table.
 
 Column names/order must match the explicit Arrow schema. Conversion uses
 PyArrow's safe conversion with the pandas index excluded; unsupported values,

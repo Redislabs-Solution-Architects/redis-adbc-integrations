@@ -8,13 +8,21 @@ import pyarrow as pa
 import pytest
 from adbc_driver_redis import dbapi
 from redis_adbc_integrations.dask import read_query
+from redis_adbc_integrations.modes import connect as mode_connect
 from distributed import Client, LocalCluster
 
 SCHEMA = pa.schema([("id", pa.int64()), ("name", pa.string())])
 
 
+LIVE_OPTIONS = {"adbc.redis.live_tables": "true", "adbc.redis.schema_ownership": "live"}
+MANAGED_OPTIONS = {"adbc.redis.live_tables": "false"}
+
+
+@pytest.mark.parametrize("mode,options", [
+    (None, LIVE_OPTIONS), ("live", LIVE_OPTIONS), ("managed", MANAGED_OPTIONS),
+])
 @pytest.mark.parametrize("failure", [None, "execute", "fetch", "schema"])
-def test_lazy_graph_and_task_cleanup(monkeypatch, failure):
+def test_lazy_graph_and_task_cleanup(monkeypatch, failure, mode, options):
     events = []
 
     class Cursor:
@@ -42,7 +50,7 @@ def test_lazy_graph_and_task_cleanup(monkeypatch, failure):
     @contextmanager
     def connect(uri, *, db_kwargs, conn_kwargs):
         assert uri == "redis://unused"
-        assert db_kwargs == {"adbc.redis.query_workers": "1"}
+        assert db_kwargs == {"adbc.redis.query_workers": "1", **options}
         assert conn_kwargs == {}
         events.append("connected")
         try:
@@ -57,6 +65,7 @@ def test_lazy_graph_and_task_cleanup(monkeypatch, failure):
         [(0, 2)],
         schema=SCHEMA,
         db_kwargs={"adbc.redis.query_workers": "1"},
+        mode=mode,
     )
     assert events == []
     assert not frame.known_divisions
@@ -95,6 +104,52 @@ def test_invalid_inputs(partitions, schema, error):
         read_query("redis://unused", "SELECT 1", partitions, schema=schema)
 
 
+@pytest.mark.parametrize("kwargs", [
+    {"mode": "snapshot"},
+    {"mode": "live", "db_kwargs": {"adbc.redis.live_tables": "false"}},
+    {"mode": "managed", "db_kwargs": {"adbc.redis.live_tables": "true"}},
+    {"db_kwargs": {"adbc.redis.live_tables": "yes"}},
+    {"mode": "managed", "db_kwargs": {"adbc.redis.schema_ownership": "live"}},
+])
+def test_invalid_mode_fails_before_connect(monkeypatch, kwargs):
+    monkeypatch.setattr(dbapi, "connect", lambda *a, **k: pytest.fail("must not connect"))
+    with pytest.raises(ValueError, match="live_tables|mode"):
+        read_query("redis://unused", "SELECT 1", [()], schema=SCHEMA, **kwargs)
+
+
+@pytest.mark.parametrize("db_kwargs,expected", [
+    ({"adbc.redis.live_tables": "false"}, MANAGED_OPTIONS),
+    ({"adbc.redis.flex": "true"}, MANAGED_OPTIONS),
+    ({"adbc.redis.live_tables": "true"}, LIVE_OPTIONS),
+    ({"adbc.redis.schema_ownership": "managed"},
+     {"adbc.redis.live_tables": "true", "adbc.redis.schema_ownership": "managed"}),
+])
+def test_explicit_driver_options_choose_mode(monkeypatch, db_kwargs, expected):
+    seen = []
+
+    class Cursor:
+        def execute(self, query, parameters):
+            pass
+
+        def fetch_arrow_table(self):
+            return SCHEMA.empty_table()
+
+    class Connection:
+        @contextmanager
+        def cursor(self):
+            yield Cursor()
+
+    @contextmanager
+    def connect(uri, *, db_kwargs, conn_kwargs):
+        seen.append(db_kwargs)
+        yield Connection()
+
+    monkeypatch.setattr(dbapi, "connect", connect)
+    read_query("redis://unused", "SELECT 1", [()], schema=SCHEMA,
+               db_kwargs=db_kwargs).compute(scheduler="synchronous")
+    assert seen == [{**db_kwargs, **expected}]
+
+
 def test_distributed_partition_coverage(uri):
     table = f"it_python_dask_{uuid.uuid4().hex}"
     source = pa.table(
@@ -119,6 +174,7 @@ def test_distributed_partition_coverage(uri):
                     (0, 0, True),
                 ],
                 schema=SCHEMA,
+                mode="managed",
             )
             with (
                 LocalCluster(
@@ -151,7 +207,8 @@ def test_distributed_partition_coverage(uri):
                 )
                 pd.testing.assert_frame_equal(projected, expected[["id"]])
                 single = read_query(
-                    uri, f'SELECT id, name FROM "{table}"', [()], schema=SCHEMA
+                    uri, f'SELECT id, name FROM "{table}"', [()], schema=SCHEMA,
+                    mode="managed",
                 )
                 pd.testing.assert_frame_equal(
                     single.compute()
@@ -161,3 +218,21 @@ def test_distributed_partition_coverage(uri):
                 )
         finally:
             cur.execute(f'DROP TABLE "{table}"')
+
+
+def test_live_partitioned_read(uri, live_table):
+    source = pa.table({"id": [-1, 0, 1, 2, 3], "name": ["a", "b", None, "d", "e"]},
+                      schema=SCHEMA)
+    name = live_table(source)
+    # The default live mode reads application-owned HASHes in redis_live.
+    frame = read_query(
+        uri, f'SELECT id, name FROM redis_live."{name}" WHERE id >= ? AND id < ?',
+        [(-2, 0), (0, 2), (2, 4)], schema=SCHEMA,
+    )
+    result = (frame.compute(scheduler="synchronous")
+              .sort_values("id").reset_index(drop=True))
+    pd.testing.assert_frame_equal(result, source.to_pandas(types_mapper=pd.ArrowDtype))
+    with mode_connect(uri, "dask") as conn, conn.cursor() as cur:
+        cur.execute(f'SELECT count(*) FROM redis_live."{name}" WHERE __key LIKE ?',
+                    (f"it:{name}:%",))
+        assert cur.fetchone() == (5,)
